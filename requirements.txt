@@ -3,7 +3,7 @@ uvicorn
 requests
 fitparse
 pandas
-psycopg2-binary
+psycopg[binary]
 sqlalchemy
 httpx
 google-genai
