@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+requests
+fitparse
+pandas
+psycopg2-binary
+sqlalchemy
+httpx
+google-genai
+groq
