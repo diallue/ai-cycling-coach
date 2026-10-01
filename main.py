@@ -167,37 +167,51 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             }
 
         # 4. Herramienta: Escribir/Modificar la agenda
-        def actualizar_calendario(objetivo: str, fecha_meta: str, sesiones: list) -> dict:
-            obj = db.query(models.Objetivo).filter(models.Objetivo.activo == True).first()
-            if not obj:
-                obj = models.Objetivo(nombre=objetivo, fecha_meta=datetime.strptime(fecha_meta, "%Y-%m-%d").date())
-                db.add(obj)
+        def actualizar_calendario(objetivo: str = None, fecha_meta: str = None, sesiones: list = []) -> dict:
+            try:
+                obj = db.query(models.Objetivo).filter(models.Objetivo.activo == True).first()
+                if not obj:
+                    # Valores de seguridad si la IA se olvida de mandar el objetivo en una reestructuración
+                    nombre_seguro = objetivo if objetivo else "Preparación Everesting"
+                    fecha_segura = fecha_meta if fecha_meta else "2026-12-31"
+                    obj = models.Objetivo(nombre=nombre_seguro, fecha_meta=datetime.strptime(fecha_segura, "%Y-%m-%d").date())
+                    db.add(obj)
+                    db.commit()
+                    db.refresh(obj)
+                else:
+                    if objetivo: obj.nombre = objetivo
+                    if fecha_meta: obj.fecha_meta = datetime.strptime(fecha_meta, "%Y-%m-%d").date()
+
+                for s in sesiones:
+                    fecha_obj = datetime.strptime(s["fecha"], "%Y-%m-%d").date()
+                    
+                    # 1. Buscamos si ya hay un entrenamiento ese día exacto
+                    sesion_db = db.query(models.EntrenamientoProgramado).filter(
+                        models.EntrenamientoProgramado.fecha_programada == fecha_obj,
+                        models.EntrenamientoProgramado.objetivo_id == obj.id
+                    ).first()
+
+                    # 2. Si no existe, lo creamos
+                    if not sesion_db:
+                        sesion_db = models.EntrenamientoProgramado(objetivo_id=obj.id, fecha_programada=fecha_obj)
+                        db.add(sesion_db)
+
+                    # 3. SOBRESCRIBIMOS todos los campos (esto aplica los cambios y los días de descanso)
+                    sesion_db.tipo_sesion = s.get("tipo_sesion", "Descanso")
+                    sesion_db.entorno = s.get("entorno", "Indoor")
+                    # Usamos int() y un valor por defecto de 0 para evitar errores si la IA manda texto o un descanso
+                    sesion_db.duracion_minutos_planeada = int(s.get("duracion_minutos", 0))
+                    sesion_db.tss_planeado = int(s.get("tss", 0))
+                    sesion_db.estado = s.get("estado", "Pendiente")
+                    sesion_db.motivo_adaptacion = s.get("motivo", "Reestructuración")
+
                 db.commit()
-                db.refresh(obj)
-            else:
-                obj.nombre = objetivo
-                obj.fecha_meta = datetime.strptime(fecha_meta, "%Y-%m-%d").date()
-
-            for s in sesiones:
-                fecha_obj = datetime.strptime(s["fecha"], "%Y-%m-%d").date()
-                sesion_db = db.query(models.EntrenamientoProgramado).filter(
-                    models.EntrenamientoProgramado.fecha_programada == fecha_obj,
-                    models.EntrenamientoProgramado.objetivo_id == obj.id
-                ).first()
-
-                if not sesion_db:
-                    sesion_db = models.EntrenamientoProgramado(objetivo_id=obj.id, fecha_programada=fecha_obj)
-                    db.add(sesion_db)
-
-                sesion_db.tipo_sesion = s.get("tipo_sesion", "Rodaje")
-                sesion_db.entorno = s.get("entorno", "Outdoor")
-                sesion_db.duracion_minutos_planeada = s.get("duracion_minutos", 60)
-                sesion_db.tss_planeado = s.get("tss", 50)
-                sesion_db.estado = s.get("estado", "Pendiente")
-                sesion_db.motivo_adaptacion = s.get("motivo", "")
-
-            db.commit()
-            return {"resultado": "El calendario se ha actualizado correctamente en la base de datos."}
+                return {"resultado": "El calendario se ha actualizado correctamente en la base de datos."}
+            
+            except Exception as e:
+                # Si la IA manda un formato loco, deshacemos los cambios para no romper la BD
+                db.rollback()
+                return {"error_herramienta": f"Fallo al guardar en BD: {str(e)}"}
 
         # 5. Prompt de Sistema (Plantilla obligatoria, secuencia de pasos y protección JSON)
         hoy_dt = datetime.now()
