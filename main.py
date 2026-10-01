@@ -19,6 +19,8 @@ from fastapi import APIRouter
 from sqlalchemy.orm import Session
 from datetime import datetime
 
+from typing import List, Optional
+
 
 # 1. Crear tablas en la BD
 models.Base.metadata.create_all(bind=engine)
@@ -32,8 +34,13 @@ ATHLETE_ID = os.getenv("INTERVALS_ATHLETE_ID")
 API_KEY = os.getenv("INTERVALS_API_KEY")
 BASE_URL = "https://intervals.icu/api/v1/athlete"
 
+class MensajeHistorial(BaseModel):
+    rol: str
+    texto: str
+
 class MensajeChat(BaseModel):
     texto: str
+    historial: Optional[List[MensajeHistorial]] = []
 
 @app.get("/")
 def read_root():
@@ -60,11 +67,14 @@ async def sync_activities(db: Session = Depends(get_db)):
     params = {"oldest": oldest, "newest": newest}
     auth = ("API_KEY", API_KEY)
     
-    async with httpx.AsyncClient() as client_http:
-        response = await client_http.get(url, params=params, auth=auth)
-        
-    if response.status_code != 200:
-        return {"error": "Fallo al conectar con Intervals.icu", "details": response.text}
+    try:
+        async with httpx.AsyncClient() as client_http:
+            response = await client_http.get(url, params=params, auth=auth)
+            
+        if response.status_code != 200:
+            return {"status": "cached", "message": "Usando datos locales (Intervals.icu no responde)"}
+    except Exception:
+        return {"status": "cached", "message": "Usando datos locales (Error de conexión)"}
         
     activities_data = response.json()
     inserted_count = 0
@@ -245,12 +255,18 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             "```json\n{\"comando\": \"consultar_calendario\"}\n```\n\n"
             "Ejemplo para actualizar la agenda:\n"
             "```json\n{\"comando\": \"actualizar_calendario\", \"objetivo\": \"Everesting\", \"fecha_meta\": \"2026-11-15\", \"sesiones\": [{\"fecha\": \"2026-09-24\", \"tipo_sesion\": \"Rodillo 45m\", \"entorno\": \"Indoor\", \"duracion_minutos\": 45, \"tss\": 40, \"estado\": \"Pendiente\", \"motivo\": \"Lluvia\"}]}\n```\n"
+            "REGLA DE ORO 5 - LÍMITE DE DOMINIO: Tu único propósito es la fisiología deportiva y tu objetivo es prepararme para mi objetivo. Si el usuario te hace preguntas sobre programación, política, recetas, o cualquier tema fuera del ciclismo o el entrenamiento de fuerza, DECLINA educadamente la respuesta y reconduce la conversación al entrenamiento.\n\n"
         )
 
-        mensajes = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": mensaje.texto}
-        ]
+        mensajes = [{"role": "system", "content": system_prompt}]
+        
+        # Inyectar memoria a corto plazo (últimos 6 mensajes)
+        if mensaje.historial:
+            for msg in mensaje.historial[-6:]:
+                role = "assistant" if msg.rol == "ia" else "user"
+                mensajes.append({"role": role, "content": msg.texto})
+
+        mensajes.append({"role": "user", "content": mensaje.texto})
 
         # 6. Bucle del Agente (Máximo 3 pasos: Consultar -> Actualizar -> Responder)
         for iteracion in range(3):
