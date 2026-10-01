@@ -19,6 +19,7 @@ from fastapi import APIRouter
 from sqlalchemy.orm import Session
 from datetime import datetime
 
+
 # 1. Crear tablas en la BD
 models.Base.metadata.create_all(bind=engine)
 
@@ -199,8 +200,9 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             return {"resultado": "El calendario se ha actualizado correctamente en la base de datos."}
 
         # 5. Prompt de Sistema (Plantilla obligatoria, secuencia de pasos y protección JSON)
+        fecha_actual = datetime.now().strftime("%A, %d de %B de %Y")
         system_prompt = (
-            f"Eres el entrenador experto en ciclismo de Diego. Su FTP actual validado en Intervals.icu es de {ftp_actual}W. "
+            f"Hoy es {fecha_actual}. Eres el entrenador experto en ciclismo de Diego. Su FTP actual validado en Intervals.icu es de {ftp_actual}W. "
             "REGLA DE ORO 1: Calcula y redacta TODAS tus explicaciones de vatios, zonas e intensidades basándote estrictamente en este valor exacto.\n\n"
             "REGLA DE ORO 2 - SECUENCIA DE ACCIÓN: Si Diego te pide planificar, cambiar o reestructurar entrenamientos, DEBES hacerlo en 2 pasos obligatorios:\n"
             "PASO 1: Emite ÚNICAMENTE el bloque de código JSON con el comando 'actualizar_calendario' y las sesiones nuevas. NO añadas texto explicativo aquí.\n"
