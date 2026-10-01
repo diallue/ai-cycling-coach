@@ -200,9 +200,17 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             return {"resultado": "El calendario se ha actualizado correctamente en la base de datos."}
 
         # 5. Prompt de Sistema (Plantilla obligatoria, secuencia de pasos y protección JSON)
-        fecha_actual = datetime.now().strftime("%A, %d de %B de %Y")
+        hoy_dt = datetime.now()
+        dias_hasta_domingo = 6 - hoy_dt.weekday() # 0 es Lunes, 6 es Domingo
+        domingo_dt = hoy_dt + timedelta(days=dias_hasta_domingo)
+        
+        fecha_hoy_str = hoy_dt.strftime("%Y-%m-%d")
+        fecha_domingo_str = domingo_dt.strftime("%Y-%m-%d")
+        
         system_prompt = (
-            f"Hoy es {fecha_actual}. Eres el entrenador experto en ciclismo de Diego. Su FTP actual validado en Intervals.icu es de {ftp_actual}W. "
+            f"Hoy es {fecha_hoy_str}. El domingo de esta semana es {fecha_domingo_str}. "
+            f"Eres el entrenador experto en ciclismo de Diego. Su FTP actual validado en Intervals.icu es de {ftp_actual}W. "
+            "REGLA DE FECHAS: Si Diego te pide un plan para 'esta semana', debes generar entrenamientos empezando ESTRICTAMENTE HOY y terminando el DOMINGO de esta semana. NUNCA programes sesiones en días anteriores a hoy.\n\n"
             "REGLA DE ORO 1: Calcula y redacta TODAS tus explicaciones de vatios, zonas e intensidades basándote estrictamente en este valor exacto.\n\n"
             "REGLA DE ORO 2 - SECUENCIA DE ACCIÓN: Si Diego te pide planificar, cambiar o reestructurar entrenamientos, DEBES hacerlo en 2 pasos obligatorios:\n"
             "PASO 1: Emite ÚNICAMENTE el bloque de código JSON con el comando 'actualizar_calendario' y las sesiones nuevas. NO añadas texto explicativo aquí.\n"
