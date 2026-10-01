@@ -256,6 +256,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             "Ejemplo para actualizar la agenda:\n"
             "```json\n{\"comando\": \"actualizar_calendario\", \"objetivo\": \"Everesting\", \"fecha_meta\": \"2026-11-15\", \"sesiones\": [{\"fecha\": \"2026-09-24\", \"tipo_sesion\": \"Rodillo 45m\", \"entorno\": \"Indoor\", \"duracion_minutos\": 45, \"tss\": 40, \"estado\": \"Pendiente\", \"motivo\": \"Lluvia\"}]}\n```\n"
             "REGLA DE ORO 5 - LÍMITE DE DOMINIO: Tu único propósito es la fisiología deportiva y tu objetivo es prepararme para mi objetivo. Si el usuario te hace preguntas sobre programación, política, recetas, o cualquier tema fuera del ciclismo o el entrenamiento de fuerza, DECLINA educadamente la respuesta y reconduce la conversación al entrenamiento.\n\n"
+            "REGLA DE ORO 6: Si el atleta te pregunta '¿Cuál es mi objetivo?' o si dudas de cuál es su meta principal, NUNCA le devuelvas la pregunta. Emite inmediatamente el comando 'consultar_calendario' para extraer el objetivo guardado en la base de datos y confírmaselo."
         )
 
         mensajes = [{"role": "system", "content": system_prompt}]
