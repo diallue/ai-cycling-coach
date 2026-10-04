@@ -218,23 +218,28 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         # 4. Prompt de Sistema (Limpio y directo)
         hoy_dt = datetime.now()
         dias_hasta_domingo = 6 - hoy_dt.weekday()
-        domingo_dt = hoy_dt + timedelta(days=dias_hasta_domingo)
-                
-        fecha_hoy_str = hoy_dt.strftime("%Y-%m-%d")
-        fecha_domingo_str = domingo_dt.strftime("%Y-%m-%d")
+        
+        # Calculamos la lista exacta de días permitidos (ej. si es domingo, solo sale el domingo)
+        fechas_validas = [(hoy_dt + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(dias_hasta_domingo + 1)]
+        fechas_validas_str = ", ".join(fechas_validas)
         
         system_prompt = (
-            f"Hoy es {fecha_hoy_str}. El domingo de esta semana es {fecha_domingo_str}.\n"
-            f"Eres el entrenador experto en ciclismo de Diego. Su FTP actual validado en la base de datos es de {ftp_actual}W.\n\n"
+            f"Hoy es {hoy_dt.strftime('%Y-%m-%d')}.\n"
+            f"Eres el entrenador experto en ciclismo de Diego. Su FTP actual validado es de {ftp_actual}W.\n\n"
             
             "1. IDENTIDAD Y ADAPTABILIDAD:\n"
             "Eres una IA conversacional capaz de razonar sobre cualquier aspecto del ciclismo (fisiología, material, nutrición, táctica). "
             "Responde de forma natural, directa y experta a cualquier duda del usuario. Si pregunta cosas ajenas al deporte, reconduce la charla educadamente. "
             "NO asumas su objetivo. Si no lo sabes, llama a tu herramienta 'consultar_calendario' para leerlo de la base de datos, o pregúntaselo directamente para poder gestionar sub-objetivos y picos de forma.\n\n"
             
-            "2. FORMATO INNEGOCIABLE PARA PLANIFICACIÓN:\n"
-            "Tienes libertad total para decidir qué entrenamientos le convienen a Diego según su estado y objetivo. SIN EMBARGO, el formato en el que se los presentas es estricto. "
-            "SOLO cuando el usuario pida explícitamente crear, ver o reestructurar un plan de entrenamiento, tu respuesta final DEBE seguir esta estructura visual:\n"
+            "2. REGLA TEMPORAL (EL RESTO DE LA SEMANA):\n"
+            "Cuando Diego te pida generar o reestructurar 'la semana', tu rango de acción es ESTRICTAMENTE desde HOY hasta el DOMINGO de esta semana. "
+            "Si hoy es martes, planificarás de martes a domingo. Si hoy es domingo, solo planificarás el domingo. NUNCA generes, menciones ni sobrescribas entrenamientos en días pasados.\n\n"
+            f"Las ÚNICAS fechas válidas para planificar o reestructurar 'esta semana' son ESTRICTAMENTE estas: [{fechas_validas_str}].\n"
+            "TIENES TOTALMENTE PROHIBIDO generar, mencionar o programar entrenamientos para fechas que no estén en esa lista exacta. Si la lista solo contiene un día (hoy), SOLO reestructurarás ese único día.\n\n"
+            
+            "3. FORMATO INNEGOCIABLE PARA PLANIFICACIÓN:\n"
+            "SOLO cuando el usuario pida explícitamente crear, ver o reestructurar un plan de entrenamiento, tu respuesta final DEBE seguir esta estructura visual (limitada estrictamente a los días que quedan en la semana):\n"
             "### 🗓 Planificación Semanal\n"
             "(Tabla Markdown: Día | Entorno | Duración | Sesión | TSS | Comentarios breves)\n\n"
             "### 🔬 Análisis Fisiológico y Ejecución\n"
@@ -242,9 +247,6 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             "**Impacto Fisiológico:** Sistemas energéticos y adaptaciones generadas.\n\n"
             "### 💡 Pro-Tips del Coach\n"
             "(2 o 3 viñetas con estrategias de nutrición, hidratación o cadencia.)\n\n"
-
-            "3. FORMATO DE RESPUESTA: \n"
-            "Si Diego pide generar o ver un plan SEMANAL completo, usa la estructura '### 🗓 Planificación Semanal' con la tabla Markdown. PERO si solo pide modificar UN DÍA concreto (ej: 'ponme descanso hoy'), NO imprimas la tabla entera. Usa la herramienta para actualizar solo esa fecha y respóndele de forma natural y breve (ej: '¡Hecho! He marcado hoy como descanso.')."
             
             "4. USO DE HERRAMIENTAS (NATIVO):\n"
             "Tienes funciones integradas para modificar la base de datos. Úsalas directamente cuando el usuario pida cambios o necesites consultar datos.\n"
@@ -268,7 +270,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 messages=mensajes,
                 tools=tools,
                 tool_choice="auto",
-                max_tokens=2048
+                max_tokens=4096
             )
             
             msg_ia = respuesta_ia.choices[0].message
