@@ -261,7 +261,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         # 5. El nuevo Bucle Nativo (Dejamos que la IA decida cuándo usar las herramientas)
         for _ in range(3):
             respuesta_ia = client.chat.completions.create(
-                model="llama3-70b-8192", # Te recomiendo este modelo en Groq para un uso perfecto de herramientas
+                model="llama-3.3-70b-versatile", # Te recomiendo este modelo en Groq para un uso perfecto de herramientas
                 messages=mensajes,
                 tools=tools,
                 tool_choice="auto",
