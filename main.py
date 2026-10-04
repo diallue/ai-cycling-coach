@@ -196,7 +196,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                             "fecha_meta": {"type": "string", "description": "Fecha en formato YYYY-MM-DD."},
                             "sesiones": {
                                 "type": "array",
-                                "description": "Lista de sesiones a programar. Déjalo vacío si el usuario solo quiere cambiar el objetivo general.",
+                                "description": "Lista de sesiones a programar. Si el usuario pide planificar o reestructurar la semana, envía todos los días ESTRICTAMENTE desde hoy hasta el domingo. Si pide modificar solo un día, envía únicamente ese día. NUNCA incluyas fechas anteriores a hoy.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -242,8 +242,11 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             "**Impacto Fisiológico:** Sistemas energéticos y adaptaciones generadas.\n\n"
             "### 💡 Pro-Tips del Coach\n"
             "(2 o 3 viñetas con estrategias de nutrición, hidratación o cadencia.)\n\n"
+
+            "3. FORMATO DE RESPUESTA: \n"
+            "Si Diego pide generar o ver un plan SEMANAL completo, usa la estructura '### 🗓 Planificación Semanal' con la tabla Markdown. PERO si solo pide modificar UN DÍA concreto (ej: 'ponme descanso hoy'), NO imprimas la tabla entera. Usa la herramienta para actualizar solo esa fecha y respóndele de forma natural y breve (ej: '¡Hecho! He marcado hoy como descanso.')."
             
-            "3. USO DE HERRAMIENTAS (NATIVO):\n"
+            "4. USO DE HERRAMIENTAS (NATIVO):\n"
             "Tienes funciones integradas para modificar la base de datos. Úsalas directamente cuando el usuario pida cambios o necesites consultar datos.\n"
             "NO escribas bloques de código JSON en tus respuestas de texto. Si usas 'actualizar_calendario', espera a recibir la confirmación del sistema y luego confírmale al usuario amigablemente que el calendario se ha actualizado, mostrando la tabla si procede."
         )
