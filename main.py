@@ -316,18 +316,29 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
 @app.get("/stats")
 def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
     try:
-        # Extraemos la última actividad sincronizada que tenga datos reales
-        ultima_act = db.query(models.Activity).filter(
-            models.Activity.icu_ctl.isnot(None)
-        ).order_by(models.Activity.start_date_local.desc()).first()
+        # 1. Extraer historial para la gráfica (últimos 30 días)
+        fecha_limite = datetime.now() - timedelta(days=30)
+        historial = db.query(models.Activity).filter(
+            models.Activity.icu_ctl.isnot(None),
+            models.Activity.start_date_local >= fecha_limite
+        ).order_by(models.Activity.start_date_local.asc()).all()
 
-        if not ultima_act:
-            return {"error": "No hay suficientes datos. Sincroniza con Intervals.icu primero."}
+        # Fallback de seguridad si hay menos de 30 días registrados
+        if not historial:
+            ultima_act = db.query(models.Activity).filter(models.Activity.icu_ctl.isnot(None)).order_by(models.Activity.start_date_local.desc()).first()
+            if not ultima_act:
+                return {"error": "No hay suficientes datos. Sincroniza con Intervals.icu primero."}
+            historial = [ultima_act]
 
+        ultima_act = historial[-1] # La más reciente para los números grandes
         ctl = round(ultima_act.icu_ctl, 1)
         atl = round(ultima_act.icu_atl, 1)
         tsb = round(ctl - atl, 1)
-        ftp = ultima_act.icu_ftp or 0 # Extraemos tu FTP real
+        ftp = ultima_act.icu_ftp or 0 
+
+        # 2. Formatear los arrays de datos para React Native
+        grafica_ctl = [{"value": round(act.icu_ctl, 1), "label": act.start_date_local.strftime("%d/%m")} for act in historial]
+        grafica_atl = [{"value": round(act.icu_atl, 1), "label": act.start_date_local.strftime("%d/%m")} for act in historial]
 
         prompt = f"El atleta tiene CTL: {ctl}, ATL: {atl}, TSB: {tsb} y su FTP actual es {ftp}W. Escribe un análisis directo y claro (2 párrafos) de su estado de forma y fatiga. Sin saludos."
         
@@ -341,8 +352,10 @@ def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
             "fitness_ctl": ctl,
             "fatiga_atl": atl,
             "frescura_tsb": tsb,
-            "ftp_actual": ftp, # Enviamos el FTP al frontend
-            "explicacion_ia": response.choices[0].message.content
+            "ftp_actual": ftp,
+            "explicacion_ia": response.choices[0].message.content,
+            "grafica_ctl": grafica_ctl,  # Enviamos la curva azul
+            "grafica_atl": grafica_atl   # Enviamos la curva roja
         }
     except Exception as e:
         return {"error": str(e)}
