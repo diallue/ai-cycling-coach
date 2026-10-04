@@ -122,69 +122,31 @@ async def sync_activities(db: Session = Depends(get_db)):
 @app.post("/chat")
 def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
     try:
-        # Extraer tu FTP real de Intervals.icu
+        # 1. Extraer FTP
         act_con_ftp = db.query(models.Activity).filter(models.Activity.icu_ftp.isnot(None)).order_by(models.Activity.start_date_local.desc()).first()
-        ftp_actual = act_con_ftp.icu_ftp if act_con_ftp else 200 # Vataje de seguridad si la BD está vacía
+        ftp_actual = act_con_ftp.icu_ftp if act_con_ftp else 200
 
-        # 1. Herramienta: Estado físico actual
-        def obtener_estado_forma() -> dict:
-            ultima_act = db.query(models.Activity).order_by(models.Activity.start_date_local.desc()).first()
-            if not ultima_act or ultima_act.icu_ctl is None:
-                return {"error": "No hay datos de fitness registrados aún."}
-            return {
-                "fecha": ultima_act.start_date_local.strftime("%Y-%m-%d"),
-                "fitness_ctl": round(ultima_act.icu_ctl, 1),
-                "fatiga_atl": round(ultima_act.icu_atl, 1),
-                "frescura_tsb": round(ultima_act.icu_ctl - ultima_act.icu_atl, 1),
-                "ftp_actual_w": ftp_actual
-            }
-
-        # 2. Herramienta: Generador de archivos ZWO
-        def crear_entrenamiento_zwo(nombre: str, descripcion: str, bloques: list) -> dict:
-            xml_content = workout_generator.generar_zwo(nombre, descripcion, bloques)
-            os.makedirs("workouts", exist_ok=True)
-            ruta = f"workouts/{nombre.replace(' ', '_').lower()}.zwo"
-            with open(ruta, "w", encoding="utf-8") as f:
-                f.write(xml_content)
-            return {"resultado": f"Archivo generado en {ruta}."}
-
-        # 3. Herramienta: Leer la agenda
-        def consultar_calendario() -> dict:
+        # 2. Las funciones nativas (Herramientas reales de Python)
+        def consultar_calendario():
             hoy = datetime.now().date()
             obj = db.query(models.Objetivo).filter(models.Objetivo.activo == True).first()
             if not obj:
-                return {"aviso": "El usuario no tiene ningún objetivo ni plan activo."}
-
+                return {"aviso": "El usuario no tiene ningún objetivo configurado aún."}
             sesiones = db.query(models.EntrenamientoProgramado).filter(
                 models.EntrenamientoProgramado.objetivo_id == obj.id,
                 models.EntrenamientoProgramado.fecha_programada >= hoy
             ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(7).all()
-
             return {
                 "objetivo": obj.nombre,
                 "fecha_meta": str(obj.fecha_meta),
-                "agenda": [
-                    {
-                        "fecha": str(s.fecha_programada),
-                        "tipo": s.tipo_sesion,
-                        "entorno": s.entorno,
-                        "duracion_min": s.duracion_minutos_planeada,
-                        "tss": s.tss_planeado,
-                        "estado": s.estado,
-                        "motivo": s.motivo_adaptacion
-                    } for s in sesiones
-                ]
+                "proximas_sesiones": [{"fecha": str(s.fecha_programada), "tipo": s.tipo_sesion} for s in sesiones]
             }
 
-        # 4. Herramienta: Escribir/Modificar la agenda
-        def actualizar_calendario(objetivo: str = None, fecha_meta: str = None, sesiones: list = []) -> dict:
+        def actualizar_calendario(objetivo=None, fecha_meta=None, sesiones=[]):
             try:
                 obj = db.query(models.Objetivo).filter(models.Objetivo.activo == True).first()
                 if not obj:
-                    # Valores de seguridad si la IA se olvida de mandar el objetivo en una reestructuración
-                    nombre_seguro = objetivo if objetivo else "Preparación Everesting"
-                    fecha_segura = fecha_meta if fecha_meta else "2026-12-31"
-                    obj = models.Objetivo(nombre=nombre_seguro, fecha_meta=datetime.strptime(fecha_segura, "%Y-%m-%d").date())
+                    obj = models.Objetivo(nombre=objetivo or "Sin definir", fecha_meta=datetime.strptime(fecha_meta or "2027-01-01", "%Y-%m-%d").date())
                     db.add(obj)
                     db.commit()
                     db.refresh(obj)
@@ -194,199 +156,157 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
 
                 for s in sesiones:
                     fecha_obj = datetime.strptime(s["fecha"], "%Y-%m-%d").date()
-                    
-                    # 1. Buscamos si ya hay un entrenamiento ese día exacto
                     sesion_db = db.query(models.EntrenamientoProgramado).filter(
                         models.EntrenamientoProgramado.fecha_programada == fecha_obj,
                         models.EntrenamientoProgramado.objetivo_id == obj.id
                     ).first()
-
-                    # 2. Si no existe, lo creamos
                     if not sesion_db:
                         sesion_db = models.EntrenamientoProgramado(objetivo_id=obj.id, fecha_programada=fecha_obj)
                         db.add(sesion_db)
-
-                    # 3. SOBRESCRIBIMOS todos los campos (esto aplica los cambios y los días de descanso)
                     sesion_db.tipo_sesion = s.get("tipo_sesion", "Descanso")
                     sesion_db.entorno = s.get("entorno", "Indoor")
-                    # Usamos int() y un valor por defecto de 0 para evitar errores si la IA manda texto o un descanso
                     sesion_db.duracion_minutos_planeada = int(s.get("duracion_minutos", 0))
                     sesion_db.tss_planeado = int(s.get("tss", 0))
                     sesion_db.estado = s.get("estado", "Pendiente")
-                    sesion_db.motivo_adaptacion = s.get("motivo", "Reestructuración")
-
                 db.commit()
-                return {"resultado": "El calendario se ha actualizado correctamente en la base de datos."}
-            
+                return {"resultado": "Base de datos actualizada con éxito."}
             except Exception as e:
-                # Si la IA manda un formato loco, deshacemos los cambios para no romper la BD
                 db.rollback()
-                return {"error_herramienta": f"Fallo al guardar en BD: {str(e)}"}
+                return {"error": str(e)}
 
-        # 5. Prompt de Sistema (Plantilla obligatoria, secuencia de pasos y protección JSON)
+        # 3. Definición estricta de las herramientas para la API (El nuevo estándar)
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "consultar_calendario",
+                    "description": "Lee la base de datos para ver el objetivo actual del atleta, su fecha límite y sus próximos entrenamientos.",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "actualizar_calendario",
+                    "description": "Actualiza el objetivo general, la fecha de la meta, o programa nuevas sesiones de entrenamiento.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "objetivo": {"type": "string", "description": "El nombre de la meta (ej. Everesting)."},
+                            "fecha_meta": {"type": "string", "description": "Fecha en formato YYYY-MM-DD."},
+                            "sesiones": {
+                                "type": "array",
+                                "description": "Lista de sesiones a programar. Déjalo vacío si el usuario solo quiere cambiar el objetivo general.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "fecha": {"type": "string"},
+                                        "tipo_sesion": {"type": "string"},
+                                        "entorno": {"type": "string"},
+                                        "duracion_minutos": {"type": "integer"},
+                                        "tss": {"type": "integer"}
+                                    },
+                                    "required": ["fecha", "tipo_sesion", "duracion_minutos"]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+
+        # 4. Prompt de Sistema (Limpio y directo)
         hoy_dt = datetime.now()
-        dias_hasta_domingo = 6 - hoy_dt.weekday() # 0 es Lunes, 6 es Domingo
+        dias_hasta_domingo = 6 - hoy_dt.weekday()
         domingo_dt = hoy_dt + timedelta(days=dias_hasta_domingo)
-        
+                
         fecha_hoy_str = hoy_dt.strftime("%Y-%m-%d")
         fecha_domingo_str = domingo_dt.strftime("%Y-%m-%d")
         
         system_prompt = (
-            f"Hoy es {fecha_hoy_str}. El domingo de esta semana es {fecha_domingo_str}. "
-            f"Eres el entrenador experto en ciclismo de Diego. Su FTP actual validado en Intervals.icu es de {ftp_actual}W. "
-            "REGLA DE FECHAS: Si Diego te pide un plan para 'esta semana', debes generar entrenamientos empezando ESTRICTAMENTE HOY y terminando el DOMINGO de esta semana. NUNCA programes sesiones en días anteriores a hoy.\n\n"
-            "REGLA DE ORO 1: Calcula y redacta TODAS tus explicaciones de vatios, zonas e intensidades basándote estrictamente en este valor exacto.\n\n"
-            "REGLA DE ORO 2 - SECUENCIA DE ACCIÓN: Si Diego te pide planificar, cambiar o reestructurar entrenamientos, DEBES hacerlo en 2 pasos obligatorios:\n"
-            "PASO 1: Emite ÚNICAMENTE el bloque de código JSON con el comando 'actualizar_calendario' y las sesiones nuevas. NO añadas texto explicativo aquí.\n"
-            "PASO 2: Cuando el sistema te devuelva un mensaje de éxito, ENTONCES redactarás tu respuesta final.\n\n"
-            "REGLA DE ORO 3 - FORMATO FINAL: Tu respuesta final (el Paso 2) NO DEBE CONTENER JSON y debe seguir EXACTAMENTE esta estructura visual:\n"
-            "### 🗓️ Planificación Semanal\n"
-            "(Tabla Markdown limpia con las columnas EXACTAS: Día | Entorno | Duración | Sesión | TSS | Comentarios breves)\n\n"
+            f"Hoy es {fecha_hoy_str}. El domingo de esta semana es {fecha_domingo_str}.\n"
+            f"Eres el entrenador experto en ciclismo de Diego. Su FTP actual validado en la base de datos es de {ftp_actual}W.\n\n"
+            
+            "1. IDENTIDAD Y ADAPTABILIDAD:\n"
+            "Eres una IA conversacional capaz de razonar sobre cualquier aspecto del ciclismo (fisiología, material, nutrición, táctica). "
+            "Responde de forma natural, directa y experta a cualquier duda del usuario. Si pregunta cosas ajenas al deporte, reconduce la charla educadamente. "
+            "NO asumas su objetivo. Si no lo sabes, llama a tu herramienta 'consultar_calendario' para leerlo de la base de datos, o pregúntaselo directamente para poder gestionar sub-objetivos y picos de forma.\n\n"
+            
+            "2. FORMATO INNEGOCIABLE PARA PLANIFICACIÓN:\n"
+            "Tienes libertad total para decidir qué entrenamientos le convienen a Diego según su estado y objetivo. SIN EMBARGO, el formato en el que se los presentas es estricto. "
+            "SOLO cuando el usuario pida explícitamente crear, ver o reestructurar un plan de entrenamiento, tu respuesta final DEBE seguir esta estructura visual:\n"
+            "### 🗓 Planificación Semanal\n"
+            "(Tabla Markdown: Día | Entorno | Duración | Sesión | TSS | Comentarios breves)\n\n"
             "### 🔬 Análisis Fisiológico y Ejecución\n"
-            "(Desglosa CADA día de la tabla. Incluye:)\n"
-            "- **Ejecución:** Pasos exactos y rangos de VATIOS calculados matemáticamente con el FTP.\n"
-            "- **Impacto Fisiológico:** Sistemas energéticos y adaptaciones generadas.\n\n"
+            "(Desglose por día con pasos exactos y VATIOS calculados matemáticamente basándote SIEMPRE en su FTP actual de la base de datos).\n"
+            "**Impacto Fisiológico:** Sistemas energéticos y adaptaciones generadas.\n\n"
             "### 💡 Pro-Tips del Coach\n"
             "(2 o 3 viñetas con estrategias de nutrición, hidratación o cadencia.)\n\n"
-            "REGLA CRÍTICA 4: ESTÁ TOTALMENTE PROHIBIDO usar llamadas a funciones nativas (tool calling). "
-            "Para pedir datos a la base de datos, debes escribir texto normal que contenga un bloque Markdown exacto con la clave 'comando'.\n"
-            "REGLA DE FORMATO JSON: El JSON debe ser estricto. NUNCA uses saltos de línea dentro de los valores de texto. CIERRA siempre todas las comillas dobles.\n\n"
-            "Ejemplo para ver la agenda:\n"
-            "```json\n{\"comando\": \"consultar_calendario\"}\n```\n\n"
-            "Ejemplo para actualizar la agenda:\n"
-            "```json\n{\"comando\": \"actualizar_calendario\", \"objetivo\": \"Everesting\", \"fecha_meta\": \"2026-11-15\", \"sesiones\": [{\"fecha\": \"2026-09-24\", \"tipo_sesion\": \"Rodillo 45m\", \"entorno\": \"Indoor\", \"duracion_minutos\": 45, \"tss\": 40, \"estado\": \"Pendiente\", \"motivo\": \"Lluvia\"}]}\n```\n"
-            "REGLA DE ORO 5 - LÍMITE DE DOMINIO: Tu único propósito es la fisiología deportiva y tu objetivo es prepararme para mi objetivo. Si el usuario te hace preguntas sobre programación, política, recetas, o cualquier tema fuera del ciclismo o el entrenamiento de fuerza, DECLINA educadamente la respuesta y reconduce la conversación al entrenamiento.\n\n"
-            "REGLA DE ORO 6: Si el atleta te pregunta '¿Cuál es mi objetivo?' o si dudas de cuál es su meta principal, NUNCA le devuelvas la pregunta. Emite inmediatamente el comando 'consultar_calendario' para extraer el objetivo guardado en la base de datos y confírmaselo."
+            
+            "3. USO DE HERRAMIENTAS (NATIVO):\n"
+            "Tienes funciones integradas para modificar la base de datos. Úsalas directamente cuando el usuario pida cambios o necesites consultar datos.\n"
+            "NO escribas bloques de código JSON en tus respuestas de texto. Si usas 'actualizar_calendario', espera a recibir la confirmación del sistema y luego confírmale al usuario amigablemente que el calendario se ha actualizado, mostrando la tabla si procede."
         )
 
         mensajes = [{"role": "system", "content": system_prompt}]
         
-        # Inyectar memoria a corto plazo (últimos 6 mensajes)
+        # Historial rodante
         if mensaje.historial:
             for msg in mensaje.historial[-6:]:
                 role = "assistant" if msg.rol == "ia" else "user"
                 mensajes.append({"role": role, "content": msg.texto})
-
+                
         mensajes.append({"role": "user", "content": mensaje.texto})
 
-        # 6. Bucle del Agente (Máximo 3 pasos: Consultar -> Actualizar -> Responder)
-        for iteracion in range(3):
-            try:
-                # Intentamos obtener la respuesta normal de la IA
-                respuesta_ia = client.chat.completions.create(
-                    model="openai/gpt-oss-20b",
-                    messages=mensajes,
-                    max_tokens=4096
-                )
-                contenido = respuesta_ia.choices[0].message.content
-                if contenido is None:
-                    contenido = ""
-                    
-            except Exception as e:
-                # RESCATE 2.0: Extraemos los datos nativos de la API sin recortar texto a mano
-                if hasattr(e, 'response'):
-                    try:
-                        error_data = e.response.json()
-                        failed_gen = error_data.get('error', {}).get('failed_generation')
-                        
-                        if failed_gen:
-                            # Convertimos el string limpio a diccionario
-                            datos_herramienta = json.loads(failed_gen)
-                            argumentos = datos_herramienta.get("arguments", {})
-                            
-                            # Si la API envolvió los argumentos en texto, lo desencapsulamos
-                            if isinstance(argumentos, str):
-                                argumentos = json.loads(argumentos)
-                                
-                            # Empaquetamos el JSON perfecto para engañar a nuestro propio interceptor
-                            contenido = f"```json\n{json.dumps(argumentos)}\n```"
-                        else:
-                            return {"error_interno": "Fallo desconocido en la API: " + str(error_data)}
-                    except Exception as ex:
-                        return {"error_interno": f"El modelo se enredó al calcular los días. Pídeselo de nuevo. Detalle técnico: {str(ex)}"}
-                else:
-                    return {"error_interno": str(e)}
+        # 5. El nuevo Bucle Nativo (Dejamos que la IA decida cuándo usar las herramientas)
+        for _ in range(3):
+            respuesta_ia = client.chat.completions.create(
+                model="llama-3.1-70b-versatile", # Te recomiendo este modelo en Groq para un uso perfecto de herramientas
+                messages=mensajes,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=2048
+            )
             
-            contenido = contenido.strip()
-
-            # 7. Interceptor de herramientas por Markdown (Evita el bloqueo de la API y limpia errores)
-            tool_result = None
-            json_str = None
+            msg_ia = respuesta_ia.choices[0].message
             
-            if "```json" in contenido:
-                inicio = contenido.find("```json") + 7
-                fin = contenido.find("```", inicio)
-                if fin != -1:
-                    json_str = contenido[inicio:fin].strip()
-                else:
-                    json_str = contenido[inicio:].strip() # Por si el modelo olvidó cerrar los backticks
-            elif "{" in contenido and "comando" in contenido:
-                inicio = contenido.find("{")
-                fin = contenido.rfind("}") + 1
-                if inicio != -1 and fin != 0:
-                    json_str = contenido[inicio:fin]
-
-            if json_str:
-                # LIMPIEZA CLAVE: Reemplaza saltos de línea accidentales por espacios para evitar el "Unterminated string"
-                json_str = json_str.replace('\n', ' ').replace('\r', '')
-                try:
-                    data_accion = json.loads(json_str)
-                    accion = data_accion.get("comando")
-                    
-                    if accion == "obtener_estado_forma":
-                        tool_result = obtener_estado_forma()
-                    elif accion == "consultar_calendario":
-                        tool_result = consultar_calendario()
-                    elif accion == "actualizar_calendario":
-                        tool_result = actualizar_calendario(
-                            objetivo=data_accion.get("objetivo"),
-                            fecha_meta=data_accion.get("fecha_meta"),
-                            sesiones=data_accion.get("sesiones", [])
-                        )
-                    elif accion == "crear_entrenamiento_zwo":
-                        tool_result = crear_entrenamiento_zwo(
-                            nombre=data_accion.get("nombre"),
-                            descripcion=data_accion.get("descripcion"),
-                            bloques=data_accion.get("bloques", [])
-                        )
-                except Exception as e:
-                    tool_result = {"error_herramienta": str(e)}
-
-            # 8. Decisión de flujo basada en las herramientas
-            if tool_result is not None:
-                mensajes.append({"role": "assistant", "content": contenido})
+            # Convertimos el objeto a diccionario para poder añadirlo al historial de mensajes
+            msg_dict = msg_ia.model_dump(exclude_unset=True)
+            mensajes.append(msg_dict)
+            
+            # Si la IA no quiso usar ninguna herramienta, significa que ya tiene el texto final listo
+            if not msg_ia.tool_calls:
+                return {"respuesta": msg_ia.content or "Hecho."}
                 
-                # Instrucción condicional: Solo exigimos la tabla si realmente hemos modificado el calendario
-                if accion == "actualizar_calendario":
-                    instruccion_final = (
-                        "La base de datos ha guardado los cambios con éxito. Ahora redacta tu respuesta final "
-                        "siguiendo ESTRICTAMENTE la estructura visual de 3 bloques (Tabla con 'Comentarios breves', "
-                        "Análisis con vatios y Pro-Tips). NO uses JSON en tu respuesta final."
+            # Si la IA usó una herramienta, la ejecutamos en Python
+            for tool_call in msg_ia.tool_calls:
+                func_name = tool_call.function.name
+                args = json.loads(tool_call.function.arguments)
+                
+                if func_name == "consultar_calendario":
+                    resultado = consultar_calendario()
+                elif func_name == "actualizar_calendario":
+                    resultado = actualizar_calendario(
+                        objetivo=args.get("objetivo"),
+                        fecha_meta=args.get("fecha_meta"),
+                        sesiones=args.get("sesiones", [])
                     )
                 else:
-                    instruccion_final = (
-                        "Responde a la pregunta del atleta de forma conversacional, natural y directa usando estos datos. "
-                        "NO uses la estructura de planificación semanal a menos que te pida crear o modificar un entrenamiento. "
-                        "NO uses JSON."
-                    )
-
+                    resultado = {"error": "Herramienta desconocida"}
+                    
+                # Le devolvemos el resultado a la IA para que continúe pensando
                 mensajes.append({
-                    "role": "user", 
-                    "content": f"Resultado del sistema: {json.dumps(tool_result)}. {instruccion_final}"
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": func_name,
+                    "content": json.dumps(resultado)
                 })
-            else:
-                # Si no usó ninguna herramienta, significa que ya ha procesado los datos y esta es la respuesta final para el atleta.
-                if not contenido:
-                    return {"respuesta": "He realizado los ajustes, pero me he quedado sin palabras. Actualiza tu calendario."}
                 
-                # Aquí cortamos la función y enviamos la respuesta al móvil
-                return {"respuesta": contenido}
-
-        # 9. Si el bucle agota los 3 intentos sin devolver nada (salida de emergencia)
-        return {"respuesta": "He procesado los datos de tu calendario. Revisa la pestaña de planificación para ver los detalles."}
+        # Si da 3 vueltas sin devolver texto (salvavidas)
+        return {"respuesta": "He procesado los datos correctamente."}
 
     except Exception as e:
-        return {"error_interno": str(e)}
+        return {"error_interno": f"Fallo en la matriz: {str(e)}"}
 
 @app.get("/stats")
 def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
