@@ -411,6 +411,49 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/exportar/archivo/{sesion_id}")
+async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
+    try:
+        sesion = db.query(models.EntrenamientoProgramado).filter(models.EntrenamientoProgramado.id == sesion_id).first()
+        if not sesion:
+            return {"error": "Sesión no encontrada"}
+
+        # 1. Obtenemos el texto para la fábrica
+        prompt = f"Convierte esta sesión para Intervals. Sesión: '{sesion.tipo_sesion}'. Reglas: Usa 'm' y '%'. Devuelve ÚNICAMENTE las líneas."
+        respuesta_ia = client.chat.completions.create(model="openai/gpt-oss-20b", messages=[{"role": "user", "content": prompt}], max_tokens=500)
+        workout_text = respuesta_ia.choices[0].message.content.strip()
+        if workout_text.startswith("```"):
+            workout_text = "\n".join(workout_text.split("\n")[1:-1]).strip()
+
+        # 2. Lo subimos de forma temporal
+        payload = {
+            "start_date_local": f"{sesion.fecha_programada}T00:00:00",
+            "type": "Ride",
+            "category": "WORKOUT",
+            "name": f"AI Coach: {sesion.tipo_sesion[:20]}",
+            "description": workout_text
+        }
+        url_events = f"{BASE_URL}/{ATHLETE_ID}/events"
+        auth = ("API_KEY", API_KEY)
+        
+        async with httpx.AsyncClient() as client_http:
+            resp_post = await client_http.post(url_events, json=payload, auth=auth)
+            if resp_post.status_code != 200:
+                return {"error": "Fallo en la compilación"}
+            
+            # 3. Pedimos el archivo .FIT compilado y lo devolvemos
+            evento_id = resp_post.json().get("id")
+            url_fit = f"{BASE_URL}/{ATHLETE_ID}/events/{evento_id}/download.fit"
+            resp_fit = await client_http.get(url_fit, auth=auth)
+
+            return Response(
+                content=resp_fit.content,
+                media_type="application/vnd.ant.fit",
+                headers={"Content-Disposition": f'attachment; filename="{sesion.tipo_sesion[:10]}.fit"'}
+            )
+    except Exception as e:
+        return {"error": str(e)}
+
 # Endpoint para la pestaña de Calendario
 @app.get("/api/calendario")
 def get_calendario(db: Session = Depends(get_db)):
