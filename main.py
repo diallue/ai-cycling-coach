@@ -24,6 +24,7 @@ from typing import List, Optional
 app = FastAPI(title="AI Cycling Coach API")
 
 # 1. Crear tablas en la BD
+models.Base.metadata.drop_all(bind=engine)
 models.Base.metadata.create_all(bind=engine)
 
 @app.on_event("startup") if 'app' in locals() else None # Se inicializa abajo tras crear FastAPI
