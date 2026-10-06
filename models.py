@@ -2,11 +2,36 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Date, 
 from sqlalchemy.orm import relationship
 from database import Base
 
+# --- NUEVO NÚCLEO MULTI-USUARIO ---
+
+class Usuario(Base):
+    """Entidad central para soportar múltiples usuarios en el futuro."""
+    __tablename__ = "usuarios"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    nombre = Column(String, nullable=False)
+    
+    # Preparando el terreno para el paso 2 (credenciales individuales)
+    intervals_athlete_id = Column(String, nullable=True)
+    intervals_api_key = Column(String, nullable=True)
+    ftp_actual = Column(Integer, default=200)
+
+    # Relaciones bidireccionales
+    actividades = relationship("Activity", back_populates="usuario")
+    objetivos = relationship("Objetivo", back_populates="usuario")
+
+
+# --- MODELOS ACTUALIZADOS CON CLAVE FORÁNEA ---
+
 class Activity(Base):
     __tablename__ = "activities"
 
     # ID único que nos dará Intervals.icu
     id = Column(String, primary_key=True, index=True)
+    
+    # Pilar relacional: Cada actividad pertenece a un usuario (por defecto tú, id=1)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, default=1)
     
     # Datos generales
     name = Column(String)
@@ -29,19 +54,23 @@ class Activity(Base):
     # Booleano útil para que la IA sepa si fue un test o carrera
     is_race = Column(Boolean, default=False)
 
+    usuario = relationship("Usuario", back_populates="actividades")
 
-# --- NUEVOS MODELOS PARA PLANIFICACIÓN INTELIGENTE ---
 
 class Objetivo(Base):
     """Define la meta final a largo plazo del macro-ciclo."""
     __tablename__ = "objetivos"
 
     id = Column(Integer, primary_key=True, index=True)
+    
+    # Pilar relacional
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, default=1)
+    
     nombre = Column(String, index=True) # ej: "Everesting"
     fecha_meta = Column(Date)
     activo = Column(Boolean, default=True)
     
-    # Relación: Un objetivo tiene muchos entrenamientos programados
+    usuario = relationship("Usuario", back_populates="objetivos")
     entrenamientos = relationship("EntrenamientoProgramado", back_populates="objetivo")
 
 
@@ -50,6 +79,10 @@ class EntrenamientoProgramado(Base):
     __tablename__ = "entrenamientos_programados"
 
     id = Column(Integer, primary_key=True, index=True)
+    
+    # Pilar relacional
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, default=1)
+    
     objetivo_id = Column(Integer, ForeignKey("objetivos.id"))
     
     fecha_programada = Column(Date, index=True)
