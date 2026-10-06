@@ -25,10 +25,34 @@ from typing import List, Optional
 # 1. Crear tablas en la BD
 models.Base.metadata.create_all(bind=engine)
 
+@app.on_event("startup") if 'app' in locals() else None # Se inicializa abajo tras crear FastAPI
+def asegurar_usuario_inicial():
+    db = SessionLocal()
+    try:
+        usuario_principal = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
+        if not usuario_principal:
+            nuevo_usuario = models.Usuario(
+                id=1,
+                email="diego@allue.com",
+                nombre="Diego Allue",
+                ftp_actual=305
+            )
+            db.add(nuevo_usuario)
+            db.commit()
+            print("Usuario principal creado con éxito en el arranque.")
+    except Exception as e:
+        print(f"Nota sobre el usuario inicial: {e}")
+    finally:
+        db.close()
+
 # 2. Configurar el nuevo cliente de Groq
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 app = FastAPI(title="AI Cycling Coach API")
+
+@app.on_event("startup")
+def startup_db_seed():
+    asegurar_usuario_inicial()
 
 ATHLETE_ID = os.getenv("INTERVALS_ATHLETE_ID")
 API_KEY = os.getenv("INTERVALS_API_KEY")
