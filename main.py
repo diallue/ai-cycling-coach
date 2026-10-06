@@ -367,14 +367,13 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
         if not sesion:
             return {"error": "Sesión no encontrada"}
 
-        # 1. La IA traduce la sesión a lenguaje de intervalos
         prompt = f"""
         Convierte esta sesión en formato de texto estricto para Intervals.icu.
         Sesión: '{sesion.tipo_sesion}'
         Reglas:
         - Usa 'm' para minutos y '%' para porcentaje de FTP.
-        - Ejemplo de repeticiones: "4x 4m 105%, 4m 50%"
-        Devuelve ÚNICAMENTE las líneas de los intervalos.
+        - Ejemplo: "4x 4m 105%, 4m 50%"
+        Devuelve ÚNICAMENTE las líneas de los intervalos. Nada de saludos ni comillas.
         """
 
         respuesta_ia = client.chat.completions.create(
@@ -384,7 +383,11 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
         )
         workout_text = respuesta_ia.choices[0].message.content.strip()
 
-        # 2. Inyectamos el evento en la nube
+        # NUEVO: Filtro anti-markdown por si la IA es rebelde y añade ```text
+        if workout_text.startswith("```"):
+            lineas = workout_text.split("\n")
+            workout_text = "\n".join(lineas[1:-1]).strip()
+
         payload = {
             "start_date_local": f"{sesion.fecha_programada}T00:00:00",
             "type": "Ride",
@@ -403,7 +406,8 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
         if response.status_code == 200:
             return {"status": "success"}
         else:
-            return {"error": "No se pudo sincronizar con Intervals.icu"}
+            # EL CAMBIO CLAVE: Ahora mostramos el error exacto que nos devuelve Intervals
+            return {"error": f"Error {response.status_code}: {response.text}"}
 
     except Exception as e:
         return {"error": str(e)}
