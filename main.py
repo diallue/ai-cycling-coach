@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Response
 import os
 import httpx
 from datetime import datetime, timedelta
@@ -357,6 +357,96 @@ def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
             "grafica_ctl": grafica_ctl,  # Enviamos la curva azul
             "grafica_atl": grafica_atl   # Enviamos la curva roja
         }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/exportar/zwo/{sesion_id}")
+def exportar_zwo(sesion_id: int, db: Session = Depends(get_db)):
+    try:
+        sesion = db.query(models.EntrenamientoProgramado).filter(models.EntrenamientoProgramado.id == sesion_id).first()
+        if not sesion:
+            return {"error": "Sesión no encontrada"}
+
+        # Extraemos el FTP real de la base de datos para cálculos si fueran necesarios, aunque ZWO usa %
+        act_con_ftp = db.query(models.Activity).filter(models.Activity.icu_ftp.isnot(None)).order_by(models.Activity.start_date_local.desc()).first()
+        ftp = act_con_ftp.icu_ftp if act_con_ftp else 200
+
+        # Pedimos a la IA que estructure el texto en un JSON matemático
+        prompt = f"""
+        Convierte esta sesión ciclista en un array JSON estructurado de intervalos.
+        Sesión: '{sesion.tipo_sesion}'
+        Duración esperada: {sesion.duracion_minutos_planeada} minutos.
+        
+        Usa ESTRICTAMENTE este formato JSON. Deduce los tiempos lógicos de calentamiento y enfriamiento para cuadrar la duración total. Si es un rodaje largo continuo, usa SteadyState.
+        [
+          {{"tipo": "Warmup", "duracion_segundos": 600, "power_percent": 50}},
+          {{"tipo": "Intervals", "repeticiones": 4, "on_duracion_seg": 240, "on_power_percent": 105, "off_duracion_seg": 240, "off_power_percent": 50}},
+          {{"tipo": "SteadyState", "duracion_segundos": 3600, "power_percent": 70}},
+          {{"tipo": "Cooldown", "duracion_segundos": 600, "power_percent": 40}}
+        ]
+        Devuelve SOLO el JSON, sin formato markdown ni texto explicativo.
+        """
+
+        respuesta_ia = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1500
+        )
+
+        # Limpiamos el texto por si la IA insiste en poner ```json
+        json_texto = respuesta_ia.choices[0].message.content.strip()
+        if json_texto.startswith("```json"):
+            json_texto = json_texto[7:-3].strip()
+        elif json_texto.startswith("```"):
+            json_texto = json_texto[3:-3].strip()
+            
+        intervalos = json.loads(json_texto)
+
+        # Construimos el archivo XML (.zwo)
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+            <workout_file>
+            <author>AI Cycling Coach</author>
+            <name>{sesion.tipo_sesion[:25]}...</name>
+            <description>Entrenamiento estructurado para tu Everesting. Entorno: {sesion.entorno}</description>
+            <sportType>bike</sportType>
+            <tags><tag name="Everesting"/></tags>
+            <workout>"""
+        
+        for bloque in intervalos:
+            tipo = bloque.get("tipo")
+            
+            if tipo == "Warmup":
+                dur = bloque.get("duracion_segundos", 600)
+                pwr = bloque.get("power_percent", 50) / 100
+                xml += f'\n        <Warmup Duration="{dur}" PowerLow="0.4" PowerHigh="{pwr}"/>'
+                
+            elif tipo == "Cooldown":
+                dur = bloque.get("duracion_segundos", 600)
+                pwr = bloque.get("power_percent", 50) / 100
+                xml += f'\n        <Cooldown Duration="{dur}" PowerLow="{pwr}" PowerHigh="0.4"/>'
+                
+            elif tipo == "SteadyState":
+                dur = bloque.get("duracion_segundos", 600)
+                pwr = bloque.get("power_percent", 70) / 100
+                xml += f'\n        <SteadyState Duration="{dur}" Power="{pwr}"/>'
+                
+            elif tipo == "Intervals":
+                reps = bloque.get("repeticiones", 1)
+                on_dur = bloque.get("on_duracion_seg", 60)
+                off_dur = bloque.get("off_duracion_seg", 60)
+                on_pwr = bloque.get("on_power_percent", 100) / 100
+                off_pwr = bloque.get("off_power_percent", 50) / 100
+                xml += f'\n        <IntervalsT Repeat="{reps}" OnDuration="{on_dur}" OffDuration="{off_dur}" OnPower="{on_pwr}" OffPower="{off_pwr}"/>'
+                
+        xml += "\n    </workout>\n</workout_file>"
+
+        # Forzamos la descarga del archivo en lugar de enviarlo como texto plano
+        return Response(
+            content=xml,
+            media_type="application/xml",
+            headers={"Content-Disposition": f'attachment; filename="entrenamiento_{sesion.id}.zwo"'}
+        )
+
     except Exception as e:
         return {"error": str(e)}
 
