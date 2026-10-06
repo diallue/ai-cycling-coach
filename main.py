@@ -11,7 +11,7 @@ from groq import Groq
 from google import genai
 from google.genai import types
 
-from database import engine, Base, get_db
+from database import SessionLocal, engine, Base, get_db
 import models
 import workout_generator
 
@@ -21,6 +21,7 @@ from datetime import datetime
 
 from typing import List, Optional
 
+app = FastAPI(title="AI Cycling Coach API")
 
 # 1. Crear tablas en la BD
 models.Base.metadata.create_all(bind=engine)
@@ -47,8 +48,6 @@ def asegurar_usuario_inicial():
 
 # 2. Configurar el nuevo cliente de Groq
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-app = FastAPI(title="AI Cycling Coach API")
 
 @app.on_event("startup")
 def startup_db_seed():
