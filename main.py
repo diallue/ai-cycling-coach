@@ -383,7 +383,6 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
         )
         workout_text = respuesta_ia.choices[0].message.content.strip()
 
-        # NUEVO: Filtro anti-markdown por si la IA es rebelde y añade ```text
         if workout_text.startswith("```"):
             lineas = workout_text.split("\n")
             workout_text = "\n".join(lineas[1:-1]).strip()
@@ -393,8 +392,8 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
             "type": "Ride",
             "category": "WORKOUT",
             "name": f"AI Coach: {sesion.tipo_sesion[:20]}",
-            "description": "Sesión generada por AI Cycling Coach",
-            "workout_doc": workout_text
+            "description": f"Sesión generada por AI Cycling Coach para tu Everesting.\n\n{workout_text}",
+            "indoor": True if sesion.entorno == 'Indoor' else False
         }
 
         url = f"{BASE_URL}/{ATHLETE_ID}/events"
