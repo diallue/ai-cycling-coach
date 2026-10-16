@@ -96,3 +96,19 @@ class EntrenamientoProgramado(Base):
     motivo_adaptacion = Column(String, nullable=True) # ej: "Lluvia", "Falta de tiempo", "Fatiga muscular"
     
     objetivo = relationship("Objetivo", back_populates="entrenamientos")
+
+class FaseMacrociclo(Base):
+    """Cada uno de los bloques/mesociclos que componen la preparación hacia el Objetivo."""
+    __tablename__ = "fases_macrociclo"
+
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, default=1)
+    objetivo_id = Column(Integer, ForeignKey("objetivos.id"), nullable=False)
+
+    orden = Column(Integer, nullable=False, default=1)
+    nombre = Column(String, nullable=False)            # Ej: "Recuperar continuidad", "Fuerza-resistencia en subida"
+    fecha_inicio = Column(Date, nullable=False)
+    fecha_fin = Column(Date, nullable=False)
+    descripcion = Column(String, nullable=False)       # Explicación fisiológica y táctica del bloque
+    foco_fisiologico = Column(String, nullable=True)   # Ej: "Torque 60-68 rpm en Z3, salidas largas Z2, Gut Training"
+    resumen_estrategico = Column(String, nullable=True) # Diagnóstico global del plan (se guarda en el bloque 1)
