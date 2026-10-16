@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Date, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Date, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -94,6 +94,9 @@ class EntrenamientoProgramado(Base):
     # --- SISTEMA DE ADAPTACIÓN A LA VIDA REAL ---
     estado = Column(String, default="Pendiente") # Puede ser: Pendiente, Completado, Adaptado, Cancelado
     motivo_adaptacion = Column(String, nullable=True) # ej: "Lluvia", "Falta de tiempo", "Fatiga muscular"
+
+    # Estructura exacta de la sesión diseñada por la IA (JSON: lista de bloques "continuo" / "intervalos")
+    estructura = Column(Text, nullable=True)
     
     objetivo = relationship("Objetivo", back_populates="entrenamientos")
 

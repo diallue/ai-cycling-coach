@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, Response
 import os
 import httpx
 from datetime import datetime, timedelta
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import json
@@ -16,6 +17,22 @@ app = FastAPI(title="AI Cycling Coach API")
 
 # 1. Crear tablas en la BD (incluyendo FaseMacrociclo si está en models.py)
 models.Base.metadata.create_all(bind=engine)
+
+def asegurar_columnas_nuevas():
+    """create_all() no añade columnas a tablas que ya existen. Esto añade, de forma idempotente,
+    la columna donde se guarda la estructura de bloques de cada sesión."""
+    for sentencia in (
+        "ALTER TABLE entrenamientos_programados ADD COLUMN IF NOT EXISTS estructura TEXT",
+        "ALTER TABLE entrenamientos_programados ADD COLUMN estructura TEXT",  # motores sin IF NOT EXISTS (p. ej. SQLite)
+    ):
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sentencia))
+            return
+        except Exception as e:
+            print(f"Nota sobre la columna 'estructura': {e}")
+
+asegurar_columnas_nuevas()
 
 # 2. Configurar el cliente de Groq
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -52,6 +69,101 @@ class MensajeHistorial(BaseModel):
 class MensajeChat(BaseModel):
     texto: str
     historial: Optional[List[MensajeHistorial]] = []
+
+DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
+def nombre_dia(fecha) -> str:
+    """Día de la semana en español (weekday(): lunes=0 ... domingo=6)."""
+    return DIAS_ES[fecha.weekday()]
+
+
+def _num(valor, defecto, minimo, maximo):
+    try:
+        n = float(valor)
+    except (TypeError, ValueError):
+        return defecto
+    return max(minimo, min(maximo, n))
+
+
+def normalizar_estructura(bloques, duracion_total):
+    """Valida los bloques que diseña la IA y los deja listos para guardar. Devuelve una lista o None."""
+    if not isinstance(bloques, list) or not bloques:
+        return None
+
+    limpios = []
+    for b in bloques:
+        if not isinstance(b, dict):
+            continue
+        etiqueta = str(b.get("etiqueta") or "Bloque")[:60]
+        if b.get("tipo") == "intervalos":
+            limpios.append({
+                "tipo": "intervalos",
+                "etiqueta": etiqueta,
+                "repeticiones": int(_num(b.get("repeticiones"), 1, 1, 30)),
+                "trabajo_min": round(_num(b.get("trabajo_min"), 5, 1, 120)),
+                "trabajo_ftp_pct": round(_num(b.get("trabajo_ftp_pct"), 95, 30, 250)),
+                "trabajo_cadencia": str(b.get("trabajo_cadencia") or "90 rpm")[:20],
+                "recuperacion_min": round(_num(b.get("recuperacion_min"), 3, 0, 60)),
+                "recuperacion_ftp_pct": round(_num(b.get("recuperacion_ftp_pct"), 55, 30, 100)),
+            })
+        else:
+            limpios.append({
+                "tipo": "continuo",
+                "etiqueta": etiqueta,
+                "duracion_min": round(_num(b.get("duracion_min"), 10, 1, 600)),
+                "ftp_pct": round(_num(b.get("ftp_pct"), 65, 30, 250)),
+                "cadencia": str(b.get("cadencia") or "90 rpm")[:20],
+            })
+    if not limpios:
+        return None
+
+    # La IA suele fallar al sumar: ajustamos el bloque continuo más largo para que cuadre con la duración total.
+    total = sum(
+        b["duracion_min"] if b["tipo"] == "continuo"
+        else b["repeticiones"] * (b["trabajo_min"] + b["recuperacion_min"])
+        for b in limpios
+    )
+    diferencia = int(duracion_total or 0) - total
+    if duracion_total and abs(diferencia) > 0.25 * int(duracion_total):
+        return None  # estructura incoherente con la duración: mejor que la app use su propia estimación
+    if diferencia != 0:
+        continuos = [b for b in limpios if b["tipo"] == "continuo"]
+        if continuos:
+            mayor = max(continuos, key=lambda b: b["duracion_min"])
+            if mayor["duracion_min"] + diferencia >= 5:
+                mayor["duracion_min"] += diferencia
+    return limpios
+
+
+def cargar_estructura(texto):
+    """JSON guardado en la BD -> lista de bloques (o None si no hay o está corrupto)."""
+    if not texto:
+        return None
+    try:
+        datos = json.loads(texto)
+    except (ValueError, TypeError):
+        return None
+    return datos if isinstance(datos, list) and datos else None
+
+
+def estructura_a_texto_intervals(estructura):
+    """Convierte los bloques guardados al formato de texto de entrenamientos de Intervals.icu."""
+    def cadencia(valor):
+        limpio = str(valor or "").lower().replace("rpm", "").replace(" ", "").strip()
+        return f" {limpio}rpm" if limpio else ""
+
+    lineas = []
+    for b in estructura:
+        lineas.append("")
+        if b.get("tipo") == "intervalos":
+            lineas.append(f"{b['etiqueta']} {b['repeticiones']}x")
+            lineas.append(f"- {b['trabajo_min']}m {b['trabajo_ftp_pct']}%{cadencia(b.get('trabajo_cadencia'))}")
+            if b["recuperacion_min"] > 0:
+                lineas.append(f"- {b['recuperacion_min']}m {b['recuperacion_ftp_pct']}%")
+        else:
+            lineas.append(b["etiqueta"])
+            lineas.append(f"- {b['duracion_min']}m {b['ftp_pct']}%{cadencia(b.get('cadencia'))}")
+    return "\n".join(lineas).strip()
 
 @app.get("/")
 def read_root():
@@ -210,6 +322,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 "proximas_sesiones": [
                     {
                         "fecha": str(s.fecha_programada),
+                        "dia_semana": nombre_dia(s.fecha_programada),
                         "tipo": s.tipo_sesion,
                         "duracion_min": s.duracion_minutos_planeada,
                         "tss": s.tss_planeado
@@ -304,6 +417,9 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     sesion_db.duracion_minutos_planeada = int(s.get("duracion_minutos", 0))
                     sesion_db.tss_planeado = int(s.get("tss", 0))
                     sesion_db.estado = s.get("estado", "Pendiente")
+                    # Sin bloques nuevos no arrastramos la estructura de la sesión anterior de ese día
+                    estructura = normalizar_estructura(s.get("bloques"), sesion_db.duracion_minutos_planeada)
+                    sesion_db.estructura = json.dumps(estructura, ensure_ascii=False) if estructura else None
                     if s.get("nota_entrenador"):
                         sesion_db.motivo_adaptacion = s.get("nota_entrenador")
                 db.commit()
@@ -376,7 +492,28 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                                         "entorno": {"type": "string"},
                                         "duracion_minutos": {"type": "integer"},
                                         "tss": {"type": "integer"},
-                                        "nota_entrenador": {"type": "string", "description": "Por qué esta sesión ayuda al bloque actual del macrociclo."}
+                                        "nota_entrenador": {"type": "string", "description": "Por qué esta sesión ayuda al bloque actual del macrociclo."},
+                                        "bloques": {
+                                            "type": "array",
+                                            "description": "Estructura exacta de la sesión, en orden (calentamiento, parte principal, enfriamiento). La suma de duraciones debe igualar duracion_minutos. Obligatorio en toda sesión con bici; omítelo solo en los descansos.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "tipo": {"type": "string", "enum": ["continuo", "intervalos"]},
+                                                    "etiqueta": {"type": "string", "description": "Nombre corto del bloque (ej. 'Calentamiento progresivo', 'Z2 con cadencia alta')."},
+                                                    "duracion_min": {"type": "integer", "description": "Solo 'continuo': minutos del bloque."},
+                                                    "ftp_pct": {"type": "integer", "description": "Solo 'continuo': % del FTP (Z1 <55, Z2 56-75, Z3 76-90, Z4 91-105, Z5 106-120)."},
+                                                    "cadencia": {"type": "string", "description": "Solo 'continuo': ej. '90 rpm' o '85-95 rpm'."},
+                                                    "repeticiones": {"type": "integer", "description": "Solo 'intervalos': número de repeticiones."},
+                                                    "trabajo_min": {"type": "integer", "description": "Solo 'intervalos': minutos de cada esfuerzo."},
+                                                    "trabajo_ftp_pct": {"type": "integer", "description": "Solo 'intervalos': % del FTP del esfuerzo."},
+                                                    "trabajo_cadencia": {"type": "string", "description": "Solo 'intervalos': cadencia del esfuerzo, ej. '95-100 rpm'."},
+                                                    "recuperacion_min": {"type": "integer", "description": "Solo 'intervalos': minutos de recuperación entre esfuerzos."},
+                                                    "recuperacion_ftp_pct": {"type": "integer", "description": "Solo 'intervalos': % del FTP de la recuperación."}
+                                                },
+                                                "required": ["tipo", "etiqueta"]
+                                            }
+                                        }
                                     },
                                     "required": ["fecha", "tipo_sesion", "duracion_minutos"]
                                 }
@@ -388,11 +525,11 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         ]
 
         dias_hasta_domingo = 6 - hoy_dt.weekday()
-        fechas_validas = [(hoy_dt + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(dias_hasta_domingo + 1)]
-        fechas_validas_str = ", ".join(fechas_validas)
+        fechas_validas = [hoy_dt + timedelta(days=i) for i in range(dias_hasta_domingo + 1)]
+        fechas_validas_str = ", ".join(f"{d.strftime('%Y-%m-%d')} ({nombre_dia(d)})" for d in fechas_validas)
 
         system_prompt = (
-            f"Hoy es {hoy_dt.strftime('%Y-%m-%d')}.\n"
+            f"Hoy es {nombre_dia(hoy_dt)} {hoy_dt.strftime('%Y-%m-%d')}.\n"
             "Eres el Director Deportivo y Fisiólogo Jefe de Diego Allue. Tu misión es diseñar una preparación de élite basada en evidencia científica y en sus datos reales.\n\n"
             
             "📊 DOSSIER HISTÓRICO REAL DE DIEGO (EXTRAÍDO DE SU BASE DE DATOS):\n"
@@ -411,7 +548,10 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             "- Antes de programar una semana con 'actualizar_calendario', consulta siempre en qué Fase/Bloque del macrociclo se encuentra hoy llamando a 'consultar_calendario'.\n"
             "- Cada entrenamiento semanal debe cumplir estrictamente la función fisiológica del bloque activo (ej. si está en 'Recuperar continuidad', prioriza consistencia, cadencia y Z2 sin sobrecargar; si está en 'Fuerza-resistencia en subida', prioriza bloques sostenidos Z3/Sweet Spot a baja cadencia y torque).\n"
             "- Usa RANGOS de potencia realistas (ej. 200-225W, 65-75% FTP) en lugar de exigir un único vatio fijo.\n"
-            f"- Para 'esta semana', las únicas fechas válidas desde hoy hasta el domingo son: [{fechas_validas_str}].\n\n"
+            f"- Para 'esta semana', las únicas fechas válidas desde hoy hasta el domingo son (con su día de la semana real): [{fechas_validas_str}]. Usa siempre ese día de la semana; no lo deduzcas tú a partir de la fecha.\n"
+            "- DISPONIBILIDAD: si Diego te ha dicho cuántas horas tiene cada día (ej. L-J 2 h, S-D 6 h), aplícalo día a día con los días de la semana de arriba. Es un TOPE diario, no un objetivo: en un bloque de recuperación puedes quedarte por debajo si lo justificas en la nota. Un día sin disponibilidad se programa como 'Descanso' con duracion_minutos 0.\n"
+            "- VARIEDAD: en una misma semana no repitas dos sesiones iguales. Aunque el bloque sea de Z2, diferencia las sesiones por duración (según la disponibilidad del día), trabajo de cadencia, final en tempo, terreno o progresión, y refléjalo en 'tipo_sesion' con un nombre descriptivo.\n"
+            "- ESTRUCTURA: cada sesión con bici debe incluir 'bloques' (calentamiento, parte principal, enfriamiento) con % de FTP y cadencia reales. La app dibuja exactamente esos bloques y los exporta al ciclocomputador, así que deben coincidir con tu análisis y sumar 'duracion_minutos'. Una sesión Z2 no lleva bloques por encima del 75% del FTP salvo que lo indiques en la nota.\n\n"
 
             "3. FORMATO INNEGOCIABLE PARA PLANIFICACIÓN:\n"
             "- Si diseñas o muestras el Macrociclo, presenta primero el Diagnóstico Estratégico y luego la lista numerada de Fases con sus fechas y propósito fisiológico.\n"
@@ -529,25 +669,29 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
         if not sesion:
             return {"error": "Sesión no encontrada"}
 
-        prompt = f"""
-        Convierte esta sesión en formato de texto estricto para Intervals.icu.
-        Sesión: '{sesion.tipo_sesion}'
-        Reglas:
-        - Usa 'm' para minutos y '%' para porcentaje de FTP.
-        - Ejemplo: "4x 4m 105%, 4m 50%"
-        Devuelve ÚNICAMENTE las líneas de los intervalos. Nada de saludos ni comillas.
-        """
+        estructura = cargar_estructura(sesion.estructura)
+        if estructura:
+            workout_text = estructura_a_texto_intervals(estructura)
+        else:
+            prompt = f"""
+            Convierte esta sesión en formato de texto estricto para Intervals.icu.
+            Sesión: '{sesion.tipo_sesion}'
+            Reglas:
+            - Usa 'm' para minutos y '%' para porcentaje de FTP.
+            - Ejemplo: "4x 4m 105%, 4m 50%"
+            Devuelve ÚNICAMENTE las líneas de los intervalos. Nada de saludos ni comillas.
+            """
 
-        respuesta_ia = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=500
-        )
-        workout_text = respuesta_ia.choices[0].message.content.strip()
+            respuesta_ia = client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=500
+            )
+            workout_text = respuesta_ia.choices[0].message.content.strip()
 
-        if workout_text.startswith("```"):
-            lineas = workout_text.split("\n")
-            workout_text = "\n".join(lineas[1:-1]).strip()
+            if workout_text.startswith("```"):
+                lineas = workout_text.split("\n")
+                workout_text = "\n".join(lineas[1:-1]).strip()
 
         payload = {
             "start_date_local": f"{sesion.fecha_programada}T00:00:00",
@@ -579,11 +723,15 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
         if not sesion:
             return {"error": "Sesión no encontrada"}
 
-        prompt = f"Convierte esta sesión para Intervals. Sesión: '{sesion.tipo_sesion}'. Reglas: Usa 'm' y '%'. Devuelve ÚNICAMENTE las líneas."
-        respuesta_ia = client.chat.completions.create(model="openai/gpt-oss-20b", messages=[{"role": "user", "content": prompt}], max_tokens=500)
-        workout_text = respuesta_ia.choices[0].message.content.strip()
-        if workout_text.startswith("```"):
-            workout_text = "\n".join(workout_text.split("\n")[1:-1]).strip()
+        estructura = cargar_estructura(sesion.estructura)
+        if estructura:
+            workout_text = estructura_a_texto_intervals(estructura)
+        else:
+            prompt = f"Convierte esta sesión para Intervals. Sesión: '{sesion.tipo_sesion}'. Reglas: Usa 'm' y '%'. Devuelve ÚNICAMENTE las líneas."
+            respuesta_ia = client.chat.completions.create(model="openai/gpt-oss-20b", messages=[{"role": "user", "content": prompt}], max_tokens=500)
+            workout_text = respuesta_ia.choices[0].message.content.strip()
+            if workout_text.startswith("```"):
+                workout_text = "\n".join(workout_text.split("\n")[1:-1]).strip()
 
         payload = {
             "start_date_local": f"{sesion.fecha_programada}T00:00:00",
@@ -714,7 +862,8 @@ def get_calendario(db: Session = Depends(get_db)):
                     "duracion": s.duracion_minutos_planeada,
                     "tss": s.tss_planeado,
                     "estado": s.estado,
-                    "nota": s.motivo_adaptacion
+                    "nota": s.motivo_adaptacion,
+                    "estructura": cargar_estructura(s.estructura)
                 } for s in sesiones
             ]
         }
