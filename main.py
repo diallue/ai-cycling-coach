@@ -6,28 +6,22 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import json
 from groq import Groq
-
-# Nuevas importaciones del SDK moderno de Gemini
-from google import genai
-from google.genai import types
+from typing import List, Optional
 
 from database import SessionLocal, engine, Base, get_db
 import models
 import workout_generator
 
-from fastapi import APIRouter
-from sqlalchemy.orm import Session
-from datetime import datetime
-
-from typing import List, Optional
-
 app = FastAPI(title="AI Cycling Coach API")
 
-# 1. Crear tablas en la BD
-models.Base.metadata.drop_all(bind=engine)
+# 1. Crear tablas en la BD (incluyendo FaseMacrociclo si está en models.py)
 models.Base.metadata.create_all(bind=engine)
 
-@app.on_event("startup") if 'app' in locals() else None # Se inicializa abajo tras crear FastAPI
+# 2. Configurar el cliente de Groq
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+# 3. Asegurar usuario principal (ID 1) en el arranque
+@app.on_event("startup")
 def asegurar_usuario_inicial():
     db = SessionLocal()
     try:
@@ -46,13 +40,6 @@ def asegurar_usuario_inicial():
         print(f"Nota sobre el usuario inicial: {e}")
     finally:
         db.close()
-
-# 2. Configurar el nuevo cliente de Groq
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-@app.on_event("startup")
-def startup_db_seed():
-    asegurar_usuario_inicial()
 
 ATHLETE_ID = os.getenv("INTERVALS_ATHLETE_ID")
 API_KEY = os.getenv("INTERVALS_API_KEY")
@@ -109,7 +96,7 @@ async def sync_activities(db: Session = Depends(get_db)):
             continue
 
         existing_act = db.query(models.Activity).filter(models.Activity.id == act.get("id")).first()
-        act_db = existing_act or models.Activity(id=act.get("id"))
+        act_db = existing_act or models.Activity(id=act.get("id"), usuario_id=1)
         
         act_db.icu_ctl = act.get("icu_ctl")
         act_db.icu_atl = act.get("icu_atl")
@@ -146,31 +133,151 @@ async def sync_activities(db: Session = Depends(get_db)):
 @app.post("/chat")
 def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
     try:
-        # 1. Extraer FTP
-        act_con_ftp = db.query(models.Activity).filter(models.Activity.icu_ftp.isnot(None)).order_by(models.Activity.start_date_local.desc()).first()
-        ftp_actual = act_con_ftp.icu_ftp if act_con_ftp else 200
+        hoy_dt = datetime.now()
+        hoy_date = hoy_dt.date()
 
-        # 2. Las funciones nativas (Herramientas reales de Python)
+        # 1. Dossier Histórico y Fisiológico Real extraído de PostgreSQL
+        act_con_ftp = db.query(models.Activity).filter(
+            models.Activity.usuario_id == 1,
+            models.Activity.icu_ftp.isnot(None)
+        ).order_by(models.Activity.start_date_local.desc()).first()
+        ftp_actual = act_con_ftp.icu_ftp if act_con_ftp else 305
+        ctl_actual = round(act_con_ftp.icu_ctl, 1) if (act_con_ftp and act_con_ftp.icu_ctl) else 0
+        atl_actual = round(act_con_ftp.icu_atl, 1) if (act_con_ftp and act_con_ftp.icu_atl) else 0
+
+        hace_un_ano = hoy_dt - timedelta(days=365)
+        hace_4_semanas = hoy_dt - timedelta(days=28)
+
+        acts_ano = db.query(models.Activity).filter(
+            models.Activity.usuario_id == 1,
+            models.Activity.start_date_local >= hace_un_ano
+        ).all()
+
+        horas_ultimo_ano = round(sum((a.moving_time or 0) for a in acts_ano) / 3600, 1)
+        desnivel_ultimo_ano = int(sum((a.total_elevation_gain or 0) for a in acts_ano))
+
+        salida_mas_larga_h = 0.0
+        salida_mas_larga_desnivel = 0
+        if acts_ano:
+            act_record = max(acts_ano, key=lambda x: (x.total_elevation_gain or 0))
+            salida_mas_larga_h = round((act_record.moving_time or 0) / 3600, 1)
+            salida_mas_larga_desnivel = int(act_record.total_elevation_gain or 0)
+
+        acts_recientes = [a for a in acts_ano if a.start_date_local and a.start_date_local >= hace_4_semanas]
+        media_horas_ultimas_4_sem = round(sum((a.moving_time or 0) for a in acts_recientes) / 3600 / 4, 1)
+
+        # 2. Herramientas Nativas en Python (Macrociclo + Microciclo)
         def consultar_calendario():
-            hoy = datetime.now().date()
-            obj = db.query(models.Objetivo).filter(models.Objetivo.activo == True).first()
+            obj = db.query(models.Objetivo).filter(
+                models.Objetivo.usuario_id == 1,
+                models.Objetivo.activo == True
+            ).first()
             if not obj:
-                return {"aviso": "El usuario no tiene ningún objetivo configurado aún."}
+                return {"aviso": "El usuario no tiene ningún objetivo ni macrociclo configurado aún."}
+
+            fases = db.query(models.FaseMacrociclo).filter(
+                models.FaseMacrociclo.usuario_id == 1,
+                models.FaseMacrociclo.objetivo_id == obj.id
+            ).order_by(models.FaseMacrociclo.orden.asc()).all()
+
+            fase_activa = None
+            for f in fases:
+                if f.fecha_inicio <= hoy_date <= f.fecha_fin:
+                    fase_activa = f.nombre
+                    break
+
             sesiones = db.query(models.EntrenamientoProgramado).filter(
+                models.EntrenamientoProgramado.usuario_id == 1,
                 models.EntrenamientoProgramado.objetivo_id == obj.id,
-                models.EntrenamientoProgramado.fecha_programada >= hoy
-            ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(7).all()
+                models.EntrenamientoProgramado.fecha_programada >= hoy_date
+            ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(10).all()
+
             return {
                 "objetivo": obj.nombre,
                 "fecha_meta": str(obj.fecha_meta),
-                "proximas_sesiones": [{"fecha": str(s.fecha_programada), "tipo": s.tipo_sesion} for s in sesiones]
+                "resumen_estrategico": fases[0].resumen_estrategico if fases else None,
+                "fase_activa_hoy": fase_activa,
+                "fases_macrociclo": [
+                    {
+                        "orden": f.orden,
+                        "nombre": f.nombre,
+                        "inicio": str(f.fecha_inicio),
+                        "fin": str(f.fecha_fin),
+                        "foco": f.foco_fisiologico,
+                        "descripcion": f.descripcion
+                    } for f in fases
+                ],
+                "proximas_sesiones": [
+                    {
+                        "fecha": str(s.fecha_programada),
+                        "tipo": s.tipo_sesion,
+                        "duracion_min": s.duracion_minutos_planeada,
+                        "tss": s.tss_planeado
+                    } for s in sesiones
+                ]
             }
+
+        def estructurar_macrociclo(objetivo, fecha_meta, resumen_estrategico, fases=[]):
+            try:
+                obj = db.query(models.Objetivo).filter(
+                    models.Objetivo.usuario_id == 1,
+                    models.Objetivo.activo == True
+                ).first()
+                fecha_meta_dt = datetime.strptime(fecha_meta, "%Y-%m-%d").date()
+
+                if not obj:
+                    obj = models.Objetivo(
+                        usuario_id=1,
+                        nombre=objetivo,
+                        fecha_meta=fecha_meta_dt,
+                        activo=True
+                    )
+                    db.add(obj)
+                    db.commit()
+                    db.refresh(obj)
+                else:
+                    obj.nombre = objetivo
+                    obj.fecha_meta = fecha_meta_dt
+
+                db.query(models.FaseMacrociclo).filter(
+                    models.FaseMacrociclo.usuario_id == 1,
+                    models.FaseMacrociclo.objetivo_id == obj.id
+                ).delete()
+
+                for idx, f in enumerate(fases):
+                    nueva_fase = models.FaseMacrociclo(
+                        usuario_id=1,
+                        objetivo_id=obj.id,
+                        orden=idx + 1,
+                        nombre=f.get("nombre", f"Fase {idx + 1}"),
+                        fecha_inicio=datetime.strptime(f["fecha_inicio"], "%Y-%m-%d").date(),
+                        fecha_fin=datetime.strptime(f["fecha_fin"], "%Y-%m-%d").date(),
+                        descripcion=f.get("descripcion", ""),
+                        foco_fisiologico=f.get("foco_fisiologico", ""),
+                        resumen_estrategico=resumen_estrategico if idx == 0 else None
+                    )
+                    db.add(nueva_fase)
+
+                db.commit()
+                return {
+                    "resultado": f"Macrociclo para '{objetivo}' guardado con éxito con {len(fases)} bloques."
+                }
+            except Exception as e:
+                db.rollback()
+                return {"error": str(e)}
 
         def actualizar_calendario(objetivo=None, fecha_meta=None, sesiones=[]):
             try:
-                obj = db.query(models.Objetivo).filter(models.Objetivo.activo == True).first()
+                obj = db.query(models.Objetivo).filter(
+                    models.Objetivo.usuario_id == 1,
+                    models.Objetivo.activo == True
+                ).first()
                 if not obj:
-                    obj = models.Objetivo(nombre=objetivo or "Sin definir", fecha_meta=datetime.strptime(fecha_meta or "2027-01-01", "%Y-%m-%d").date())
+                    obj = models.Objetivo(
+                        usuario_id=1,
+                        nombre=objetivo or "Everesting",
+                        fecha_meta=datetime.strptime(fecha_meta or "2027-08-25", "%Y-%m-%d").date()
+                    )
                     db.add(obj)
                     db.commit()
                     db.refresh(obj)
@@ -181,46 +288,86 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 for s in sesiones:
                     fecha_obj = datetime.strptime(s["fecha"], "%Y-%m-%d").date()
                     sesion_db = db.query(models.EntrenamientoProgramado).filter(
+                        models.EntrenamientoProgramado.usuario_id == 1,
                         models.EntrenamientoProgramado.fecha_programada == fecha_obj,
                         models.EntrenamientoProgramado.objetivo_id == obj.id
                     ).first()
                     if not sesion_db:
-                        sesion_db = models.EntrenamientoProgramado(objetivo_id=obj.id, fecha_programada=fecha_obj)
+                        sesion_db = models.EntrenamientoProgramado(
+                            usuario_id=1,
+                            objetivo_id=obj.id,
+                            fecha_programada=fecha_obj
+                        )
                         db.add(sesion_db)
                     sesion_db.tipo_sesion = s.get("tipo_sesion", "Descanso")
                     sesion_db.entorno = s.get("entorno", "Indoor")
                     sesion_db.duracion_minutos_planeada = int(s.get("duracion_minutos", 0))
                     sesion_db.tss_planeado = int(s.get("tss", 0))
                     sesion_db.estado = s.get("estado", "Pendiente")
+                    if s.get("nota_entrenador"):
+                        sesion_db.motivo_adaptacion = s.get("nota_entrenador")
                 db.commit()
-                return {"resultado": "Base de datos actualizada con éxito."}
+                return {"resultado": "Sesiones del microciclo actualizadas con éxito."}
             except Exception as e:
                 db.rollback()
                 return {"error": str(e)}
 
-        # 3. Definición estricta de las herramientas para la API (El nuevo estándar)
+        # 3. Definición de Herramientas para Groq
         tools = [
             {
                 "type": "function",
                 "function": {
                     "name": "consultar_calendario",
-                    "description": "Lee la base de datos para ver el objetivo actual del atleta, su fecha límite y sus próximos entrenamientos.",
+                    "description": "Lee la base de datos para ver el objetivo actual, los bloques/fases del macrociclo, la fase activa hoy y los próximos entrenamientos.",
                     "parameters": {"type": "object", "properties": {}}
                 }
             },
             {
                 "type": "function",
                 "function": {
-                    "name": "actualizar_calendario",
-                    "description": "Actualiza el objetivo general, la fecha de la meta, o programa nuevas sesiones de entrenamiento.",
+                    "name": "estructurar_macrociclo",
+                    "description": "Crea o actualiza el plan completo de preparación por bloques/fases (macrociclo) desde hoy hasta la fecha del objetivo final.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "objetivo": {"type": "string", "description": "El nombre de la meta (ej. Everesting)."},
-                            "fecha_meta": {"type": "string", "description": "Fecha en formato YYYY-MM-DD."},
+                            "objetivo": {"type": "string", "description": "Nombre del objetivo (ej. Everesting)."},
+                            "fecha_meta": {"type": "string", "description": "Fecha final del reto en formato YYYY-MM-DD."},
+                            "resumen_estrategico": {
+                                "type": "string",
+                                "description": "Diagnóstico experto de 2 párrafos analizando el historial real del ciclista (horas, desnivel anual, salida récord, volumen reciente) y la estrategia global hacia el objetivo."
+                            },
+                            "fases": {
+                                "type": "array",
+                                "description": "Lista cronológica y continua de bloques/fases que cubren desde la fecha actual hasta la fecha_meta.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "nombre": {"type": "string", "description": "Título claro del bloque (ej. 'Recuperar continuidad', 'Base aeróbica', 'Fuerza-resistencia en subida')."},
+                                        "fecha_inicio": {"type": "string", "description": "YYYY-MM-DD"},
+                                        "fecha_fin": {"type": "string", "description": "YYYY-MM-DD"},
+                                        "descripcion": {"type": "string", "description": "Explicación detallada del propósito fisiológico, mental, nutricional y de carga de este bloque."},
+                                        "foco_fisiologico": {"type": "string", "description": "Zonas de potencia prioritarias, cadencia y tipo de sesiones clave del bloque."}
+                                    },
+                                    "required": ["nombre", "fecha_inicio", "fecha_fin", "descripcion"]
+                                }
+                            }
+                        },
+                        "required": ["objetivo", "fecha_meta", "resumen_estrategico", "fases"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "actualizar_calendario",
+                    "description": "Programa o modifica las sesiones de entrenamiento de la semana actual alineadas con el bloque activo del macrociclo.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "objetivo": {"type": "string"},
+                            "fecha_meta": {"type": "string"},
                             "sesiones": {
                                 "type": "array",
-                                "description": "Lista de sesiones a programar. Si el usuario pide planificar o reestructurar la semana, envía todos los días ESTRICTAMENTE desde hoy hasta el domingo. Si pide modificar solo un día, envía únicamente ese día. NUNCA incluyas fechas anteriores a hoy.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -228,7 +375,8 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                                         "tipo_sesion": {"type": "string"},
                                         "entorno": {"type": "string"},
                                         "duracion_minutos": {"type": "integer"},
-                                        "tss": {"type": "integer"}
+                                        "tss": {"type": "integer"},
+                                        "nota_entrenador": {"type": "string", "description": "Por qué esta sesión ayuda al bloque actual del macrociclo."}
                                     },
                                     "required": ["fecha", "tipo_sesion", "duracion_minutos"]
                                 }
@@ -239,81 +387,77 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             }
         ]
 
-        # 4. Prompt de Sistema (Limpio y directo)
-        hoy_dt = datetime.now()
         dias_hasta_domingo = 6 - hoy_dt.weekday()
-        
-        # Calculamos la lista exacta de días permitidos (ej. si es domingo, solo sale el domingo)
         fechas_validas = [(hoy_dt + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(dias_hasta_domingo + 1)]
         fechas_validas_str = ", ".join(fechas_validas)
-        
+
         system_prompt = (
             f"Hoy es {hoy_dt.strftime('%Y-%m-%d')}.\n"
-            f"Eres el entrenador experto en ciclismo de Diego. Su FTP actual validado es de {ftp_actual}W.\n\n"
+            "Eres el Director Deportivo y Fisiólogo Jefe de Diego Allue. Tu misión es diseñar una preparación de élite basada en evidencia científica y en sus datos reales.\n\n"
             
-            "1. IDENTIDAD Y ADAPTABILIDAD:\n"
-            "Eres una IA conversacional capaz de razonar sobre cualquier aspecto del ciclismo (fisiología, material, nutrición, táctica). "
-            "Responde de forma natural, directa y experta a cualquier duda del usuario. Si pregunta cosas ajenas al deporte, reconduce la charla educadamente. "
-            "NO asumas su objetivo. Si no lo sabes, llama a tu herramienta 'consultar_calendario' para leerlo de la base de datos, o pregúntaselo directamente para poder gestionar sub-objetivos y picos de forma.\n\n"
-            
-            "2. REGLA TEMPORAL (EL RESTO DE LA SEMANA):\n"
-            "Cuando Diego te pida generar o reestructurar 'la semana', tu rango de acción es ESTRICTAMENTE desde HOY hasta el DOMINGO de esta semana. "
-            "Si hoy es martes, planificarás de martes a domingo. Si hoy es domingo, solo planificarás el domingo. NUNCA generes, menciones ni sobrescribas entrenamientos en días pasados.\n\n"
-            f"Las ÚNICAS fechas válidas para planificar o reestructurar 'esta semana' son ESTRICTAMENTE estas: [{fechas_validas_str}].\n"
-            "TIENES TOTALMENTE PROHIBIDO generar, mencionar o programar entrenamientos para fechas que no estén en esa lista exacta. Si la lista solo contiene un día (hoy), SOLO reestructurarás ese único día.\n\n"
-            
+            "📊 DOSSIER HISTÓRICO REAL DE DIEGO (EXTRAÍDO DE SU BASE DE DATOS):\n"
+            f"- FTP Validado: {ftp_actual}W (~{round(ftp_actual/71.0, 2)} W/kg para 71 kg).\n"
+            f"- Estado de forma actual: Fitness (CTL) {ctl_actual} | Fatiga (ATL) {atl_actual} | Balance (TSB) {round(ctl_actual - atl_actual, 1)}.\n"
+            f"- Volumen últimos 365 días: {horas_ultimo_ano} horas acumuladas y {desnivel_ultimo_ano:,} m de desnivel positivo.\n"
+            f"- Mayor jornada registrada en el último año: {salida_mas_larga_h} h con {salida_mas_larga_desnivel:,} m de desnivel positivo.\n"
+            f"- Tendencia reciente (últimas 4 semanas): promedio de {media_horas_ultimas_4_sem} h/semana.\n\n"
+
+            "1. ARQUITECTURA DE PERIODIZACIÓN POR BLOQUES (MACROCICLO):\n"
+            "- No utilices plantillas genéricas. Analiza siempre la brecha fisiológica entre el estado actual de Diego (su volumen reciente vs. su historial anual) y las demandas específicas de su objetivo.\n"
+            "- PROTOCOLO DE ENTREVISTA EXPERTA: Cuando Diego te pida estructurar un plan o macrociclo para un objetivo, verifica primero si conoces: (a) fecha exacta del reto, (b) horas semanales sostenibles actuales (L-V y fin de semana), y (c) detalles específicos del reto (ej. si ya tiene puerto elegido/pendiente media o si aún está por definir). Si falta algún dato clave para que el plan sea quirúrgico, hazle 2 o 3 preguntas directas y breves como un entrenador profesional antes de cerrarlo. Si ya te da los datos o te pide que lo estructures directamente con tu criterio, llama a la herramienta 'estructurar_macrociclo' creando los bloques óptimos desde hoy hasta la fecha meta.\n"
+            "- Al redactar 'resumen_estrategico' y las 'fases' en 'estructurar_macrociclo', cita sus métricas históricas reales (horas último año, desnivel acumulado, salida más larga, horas recientes) para justificar por qué empieza con ese primer bloque.\n\n"
+
+            "2. COHERENCIA ENTRE EL BLOQUE ACTIVO Y LOS ENTRENAMIENTOS SEMANALES:\n"
+            "- Antes de programar una semana con 'actualizar_calendario', consulta siempre en qué Fase/Bloque del macrociclo se encuentra hoy llamando a 'consultar_calendario'.\n"
+            "- Cada entrenamiento semanal debe cumplir estrictamente la función fisiológica del bloque activo (ej. si está en 'Recuperar continuidad', prioriza consistencia, cadencia y Z2 sin sobrecargar; si está en 'Fuerza-resistencia en subida', prioriza bloques sostenidos Z3/Sweet Spot a baja cadencia y torque).\n"
+            "- Usa RANGOS de potencia realistas (ej. 200-225W, 65-75% FTP) en lugar de exigir un único vatio fijo.\n"
+            f"- Para 'esta semana', las únicas fechas válidas desde hoy hasta el domingo son: [{fechas_validas_str}].\n\n"
+
             "3. FORMATO INNEGOCIABLE PARA PLANIFICACIÓN:\n"
-            "SOLO cuando el usuario pida explícitamente crear, ver o reestructurar un plan de entrenamiento, tu respuesta final DEBE seguir esta estructura visual (limitada estrictamente a los días que quedan en la semana):\n"
+            "- Si diseñas o muestras el Macrociclo, presenta primero el Diagnóstico Estratégico y luego la lista numerada de Fases con sus fechas y propósito fisiológico.\n"
+            "- SOLO cuando el usuario pida crear, ver o reestructurar la semana de entrenamiento, usa esta estructura:\n"
             "### 🗓 Planificación Semanal\n"
-            "(Tabla Markdown: Día | Entorno | Duración | Sesión | TSS | Comentarios breves)\n\n"
+            "(Tabla Markdown: Día | Entorno | Duración | Sesión | TSS | Enfoque del Bloque)\n\n"
             "### 🔬 Análisis Fisiológico y Ejecución\n"
-            "(Desglose por día con pasos exactos y VATIOS calculados matemáticamente basándote SIEMPRE en su FTP actual de la base de datos).\n"
-            "**Impacto Fisiológico:** Sistemas energéticos y adaptaciones generadas.\n\n"
+            "(Desglose por día con pasos y RANGOS de vatios calculados sobre su FTP actual).\n\n"
             "### 💡 Pro-Tips del Coach\n"
-            "(2 o 3 viñetas con estrategias de nutrición, hidratación o cadencia.)\n\n"
-            
-            "4. USO DE HERRAMIENTAS (NATIVO):\n"
-            "Tienes funciones integradas para modificar la base de datos. Úsalas directamente cuando el usuario pida cambios o necesites consultar datos.\n"
-            "NO escribas bloques de código JSON en tus respuestas de texto. Si usas 'actualizar_calendario', espera a recibir la confirmación del sistema y luego confírmale al usuario amigablemente que el calendario se ha actualizado, mostrando la tabla si procede."
+            "(2 o 3 viñetas con estrategias de nutrición, hidratación o cadencia.)"
         )
 
         mensajes = [{"role": "system", "content": system_prompt}]
-        
-        # Historial rodante
         if mensaje.historial:
             for msg in mensaje.historial[-6:]:
                 role = "assistant" if msg.rol == "ia" else "user"
                 mensajes.append({"role": role, "content": msg.texto})
-                
         mensajes.append({"role": "user", "content": mensaje.texto})
 
-        # 5. El nuevo Bucle Nativo (Dejamos que la IA decida cuándo usar las herramientas)
-        for _ in range(3):
+        for _ in range(4):
             respuesta_ia = client.chat.completions.create(
-                model="openai/gpt-oss-120b", # Te recomiendo este modelo en Groq para un uso perfecto de herramientas
+                model="openai/gpt-oss-120b",
                 messages=mensajes,
                 tools=tools,
                 tool_choice="auto",
                 max_tokens=4096
             )
-            
             msg_ia = respuesta_ia.choices[0].message
-            
-            # Convertimos el objeto a diccionario para poder añadirlo al historial de mensajes
-            msg_dict = msg_ia.model_dump(exclude_unset=True)
-            mensajes.append(msg_dict)
-            
-            # Si la IA no quiso usar ninguna herramienta, significa que ya tiene el texto final listo
+            mensajes.append(msg_ia.model_dump(exclude_unset=True))
+
             if not msg_ia.tool_calls:
-                return {"respuesta": msg_ia.content or "Hecho."}
-                
-            # Si la IA usó una herramienta, la ejecutamos en Python
+                return {"respuesta": msg_ia.content or "Plan actualizado correctamente."}
+
             for tool_call in msg_ia.tool_calls:
                 func_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
-                
+
                 if func_name == "consultar_calendario":
                     resultado = consultar_calendario()
+                elif func_name == "estructurar_macrociclo":
+                    resultado = estructurar_macrociclo(
+                        objetivo=args.get("objetivo"),
+                        fecha_meta=args.get("fecha_meta"),
+                        resumen_estrategico=args.get("resumen_estrategico"),
+                        fases=args.get("fases", [])
+                    )
                 elif func_name == "actualizar_calendario":
                     resultado = actualizar_calendario(
                         objetivo=args.get("objetivo"),
@@ -322,45 +466,39 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     )
                 else:
                     resultado = {"error": "Herramienta desconocida"}
-                    
-                # Le devolvemos el resultado a la IA para que continúe pensando
+
                 mensajes.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "name": func_name,
                     "content": json.dumps(resultado)
                 })
-                
-        # Si da 3 vueltas sin devolver texto (salvavidas)
-        return {"respuesta": "He procesado los datos correctamente."}
 
+        return {"respuesta": "He actualizado tu estructura de entrenamiento correctamente."}
     except Exception as e:
         return {"error_interno": f"Fallo en la matriz: {str(e)}"}
 
 @app.get("/stats")
 def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
     try:
-        # 1. Extraer historial para la gráfica (últimos 30 días)
         fecha_limite = datetime.now() - timedelta(days=30)
         historial = db.query(models.Activity).filter(
             models.Activity.icu_ctl.isnot(None),
             models.Activity.start_date_local >= fecha_limite
         ).order_by(models.Activity.start_date_local.asc()).all()
 
-        # Fallback de seguridad si hay menos de 30 días registrados
         if not historial:
             ultima_act = db.query(models.Activity).filter(models.Activity.icu_ctl.isnot(None)).order_by(models.Activity.start_date_local.desc()).first()
             if not ultima_act:
                 return {"error": "No hay suficientes datos. Sincroniza con Intervals.icu primero."}
             historial = [ultima_act]
 
-        ultima_act = historial[-1] # La más reciente para los números grandes
+        ultima_act = historial[-1]
         ctl = round(ultima_act.icu_ctl, 1)
         atl = round(ultima_act.icu_atl, 1)
         tsb = round(ctl - atl, 1)
         ftp = ultima_act.icu_ftp or 0 
 
-        # 2. Formatear los arrays de datos para React Native
         grafica_ctl = [{"value": round(act.icu_ctl, 1), "label": act.start_date_local.strftime("%d/%m")} for act in historial]
         grafica_atl = [{"value": round(act.icu_atl, 1), "label": act.start_date_local.strftime("%d/%m")} for act in historial]
 
@@ -378,8 +516,8 @@ def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
             "frescura_tsb": tsb,
             "ftp_actual": ftp,
             "explicacion_ia": response.choices[0].message.content,
-            "grafica_ctl": grafica_ctl,  # Enviamos la curva azul
-            "grafica_atl": grafica_atl   # Enviamos la curva roja
+            "grafica_ctl": grafica_ctl,
+            "grafica_atl": grafica_atl
         }
     except Exception as e:
         return {"error": str(e)}
@@ -429,7 +567,6 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
         if response.status_code == 200:
             return {"status": "success"}
         else:
-            # EL CAMBIO CLAVE: Ahora mostramos el error exacto que nos devuelve Intervals
             return {"error": f"Error {response.status_code}: {response.text}"}
 
     except Exception as e:
@@ -442,14 +579,12 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
         if not sesion:
             return {"error": "Sesión no encontrada"}
 
-        # 1. Obtenemos el texto para la fábrica
         prompt = f"Convierte esta sesión para Intervals. Sesión: '{sesion.tipo_sesion}'. Reglas: Usa 'm' y '%'. Devuelve ÚNICAMENTE las líneas."
         respuesta_ia = client.chat.completions.create(model="openai/gpt-oss-20b", messages=[{"role": "user", "content": prompt}], max_tokens=500)
         workout_text = respuesta_ia.choices[0].message.content.strip()
         if workout_text.startswith("```"):
             workout_text = "\n".join(workout_text.split("\n")[1:-1]).strip()
 
-        # 2. Lo subimos de forma temporal
         payload = {
             "start_date_local": f"{sesion.fecha_programada}T00:00:00",
             "type": "Ride",
@@ -465,7 +600,6 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
             if resp_post.status_code != 200:
                 return {"error": "Fallo en la compilación"}
             
-            # 3. Pedimos el archivo .FIT compilado y lo devolvemos
             evento_id = resp_post.json().get("id")
             url_fit = f"{BASE_URL}/{ATHLETE_ID}/events/{evento_id}/download.fit"
             resp_fit = await client_http.get(url_fit, auth=auth)
@@ -478,23 +612,111 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         return {"error": str(e)}
 
-# Endpoint para la pestaña de Calendario
 @app.get("/api/calendario")
 def get_calendario(db: Session = Depends(get_db)):
     hoy = datetime.now().date()
-    # Recuperamos los próximos 14 días de entrenamientos
+
+    act_con_ftp = db.query(models.Activity).filter(
+        models.Activity.usuario_id == 1,
+        models.Activity.icu_ftp.isnot(None)
+    ).order_by(models.Activity.start_date_local.desc()).first()
+    ftp_actual = act_con_ftp.icu_ftp if act_con_ftp else 305
+
+    obj = db.query(models.Objetivo).filter(
+        models.Objetivo.usuario_id == 1,
+        models.Objetivo.activo == True
+    ).first()
+
+    fases_db = []
+    if obj:
+        fases_db = db.query(models.FaseMacrociclo).filter(
+            models.FaseMacrociclo.usuario_id == 1,
+            models.FaseMacrociclo.objetivo_id == obj.id
+        ).order_by(models.FaseMacrociclo.orden.asc()).all()
+
+    fases_formateadas = []
+    fase_activa_info = None
+    resumen_estrategico = None
+
+    for idx, f in enumerate(fases_db):
+        if idx == 0 and f.resumen_estrategico:
+            resumen_estrategico = f.resumen_estrategico
+
+        dias_totales = max(1, (f.fecha_fin - f.fecha_inicio).days + 1)
+        if hoy < f.fecha_inicio:
+            estado_fase = "pendiente"
+            dias_restantes = (f.fecha_fin - f.fecha_inicio).days + 1
+            progreso = 0
+        elif hoy > f.fecha_fin:
+            estado_fase = "completada"
+            dias_restantes = 0
+            progreso = 100
+        else:
+            estado_fase = "activa"
+            dias_restantes = (f.fecha_fin - hoy).days + 1
+            dias_transcurridos = (hoy - f.fecha_inicio).days + 1
+            progreso = min(100, max(5, int((dias_transcurridos / dias_totales) * 100)))
+
+        item_fase = {
+            "id": f.id,
+            "orden": f.orden,
+            "nombre": f.nombre,
+            "fecha_inicio": f.fecha_inicio.strftime("%Y-%m-%d"),
+            "fecha_fin": f.fecha_fin.strftime("%Y-%m-%d"),
+            "descripcion": f.descripcion,
+            "foco": f.foco_fisiologico,
+            "estado": estado_fase,
+            "dias_restantes": dias_restantes,
+            "progreso": progreso
+        }
+        fases_formateadas.append(item_fase)
+        if estado_fase == "activa":
+            fase_activa_info = item_fase
+
     sesiones = db.query(models.EntrenamientoProgramado).filter(
+        models.EntrenamientoProgramado.usuario_id == 1,
         models.EntrenamientoProgramado.fecha_programada >= hoy
     ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(14).all()
+
+    return {
+        "telemetria": {
+            "ftp": ftp_actual,
+            "peso": 71.0,
+            "lthr": 173,
+            "max_hr": 197,
+            "objetivo": obj.nombre if obj else "Everesting",
+            "fecha_meta": obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else "2027-08-25"
+        },
+        "macrociclo": {
+            "objetivo": obj.nombre if obj else "Everesting",
+            "fecha_meta": obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else "2027-08-25",
+            "total_fases": len(fases_formateadas),
+            "resumen_estrategico": resumen_estrategico,
+            "fase_activa": fase_activa_info,
+            "fases": fases_formateadas
+        },
+        "sesiones": [
+            {
+                "id": s.id,
+                "fecha": s.fecha_programada.strftime("%Y-%m-%d"),
+                "sesion": s.tipo_sesion,
+                "entorno": s.entorno,
+                "duracion": s.duracion_minutos_planeada,
+                "tss": s.tss_planeado,
+                "estado": s.estado,
+                "nota": s.motivo_adaptacion
+            } for s in sesiones
+        ]
+    }
+
+@app.post("/api/calendario/toggle/{sesion_id}")
+def toggle_estado_sesion(sesion_id: int, db: Session = Depends(get_db)):
+    sesion = db.query(models.EntrenamientoProgramado).filter(
+        models.EntrenamientoProgramado.id == sesion_id
+    ).first()
+    if not sesion:
+        return {"error": "Sesión no encontrada"}
     
-    return [
-        {
-            "id": s.id,
-            "fecha": s.fecha_programada.strftime("%Y-%m-%d"),
-            "sesion": s.tipo_sesion,
-            "entorno": s.entorno,
-            "duracion": s.duracion_minutos_planeada,
-            "tss": s.tss_planeado,
-            "estado": s.estado
-        } for s in sesiones
-    ]
+    sesion.estado = "Completado" if sesion.estado != "Completado" else "Pendiente"
+    db.commit()
+    return {"status": "success", "nuevo_estado": sesion.estado}
