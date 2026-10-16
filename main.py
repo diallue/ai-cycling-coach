@@ -614,100 +614,117 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/calendario")
 def get_calendario(db: Session = Depends(get_db)):
-    hoy = datetime.now().date()
+    try:
+        hoy = datetime.now().date()
 
-    act_con_ftp = db.query(models.Activity).filter(
-        models.Activity.usuario_id == 1,
-        models.Activity.icu_ftp.isnot(None)
-    ).order_by(models.Activity.start_date_local.desc()).first()
-    ftp_actual = act_con_ftp.icu_ftp if act_con_ftp else 305
+        act_con_ftp = db.query(models.Activity).filter(
+            models.Activity.usuario_id == 1,
+            models.Activity.icu_ftp.isnot(None)
+        ).order_by(models.Activity.start_date_local.desc()).first()
+        ftp_actual = act_con_ftp.icu_ftp if act_con_ftp else 305
 
-    obj = db.query(models.Objetivo).filter(
-        models.Objetivo.usuario_id == 1,
-        models.Objetivo.activo == True
-    ).first()
+        obj = db.query(models.Objetivo).filter(
+            models.Objetivo.usuario_id == 1,
+            models.Objetivo.activo == True
+        ).first()
 
-    fases_db = []
-    if obj:
-        fases_db = db.query(models.FaseMacrociclo).filter(
-            models.FaseMacrociclo.usuario_id == 1,
-            models.FaseMacrociclo.objetivo_id == obj.id
-        ).order_by(models.FaseMacrociclo.orden.asc()).all()
+        fases_db = []
+        if obj and hasattr(models, "FaseMacrociclo"):
+            try:
+                fases_db = db.query(models.FaseMacrociclo).filter(
+                    models.FaseMacrociclo.usuario_id == 1,
+                    models.FaseMacrociclo.objetivo_id == obj.id
+                ).order_by(models.FaseMacrociclo.orden.asc()).all()
+            except Exception:
+                fases_db = []
 
-    fases_formateadas = []
-    fase_activa_info = None
-    resumen_estrategico = None
+        fases_formateadas = []
+        fase_activa_info = None
+        resumen_estrategico = None
 
-    for idx, f in enumerate(fases_db):
-        if idx == 0 and f.resumen_estrategico:
-            resumen_estrategico = f.resumen_estrategico
+        for idx, f in enumerate(fases_db):
+            if idx == 0 and f.resumen_estrategico:
+                resumen_estrategico = f.resumen_estrategico
 
-        dias_totales = max(1, (f.fecha_fin - f.fecha_inicio).days + 1)
-        if hoy < f.fecha_inicio:
-            estado_fase = "pendiente"
-            dias_restantes = (f.fecha_fin - f.fecha_inicio).days + 1
-            progreso = 0
-        elif hoy > f.fecha_fin:
-            estado_fase = "completada"
-            dias_restantes = 0
-            progreso = 100
-        else:
-            estado_fase = "activa"
-            dias_restantes = (f.fecha_fin - hoy).days + 1
-            dias_transcurridos = (hoy - f.fecha_inicio).days + 1
-            progreso = min(100, max(5, int((dias_transcurridos / dias_totales) * 100)))
+            dias_totales = max(1, (f.fecha_fin - f.fecha_inicio).days + 1)
+            if hoy < f.fecha_inicio:
+                estado_fase = "pendiente"
+                dias_restantes = (f.fecha_fin - f.fecha_inicio).days + 1
+                progreso = 0
+            elif hoy > f.fecha_fin:
+                estado_fase = "completada"
+                dias_restantes = 0
+                progreso = 100
+            else:
+                estado_fase = "activa"
+                dias_restantes = (f.fecha_fin - hoy).days + 1
+                dias_transcurridos = (hoy - f.fecha_inicio).days + 1
+                progreso = min(100, max(5, int((dias_transcurridos / dias_totales) * 100)))
 
-        item_fase = {
-            "id": f.id,
-            "orden": f.orden,
-            "nombre": f.nombre,
-            "fecha_inicio": f.fecha_inicio.strftime("%Y-%m-%d"),
-            "fecha_fin": f.fecha_fin.strftime("%Y-%m-%d"),
-            "descripcion": f.descripcion,
-            "foco": f.foco_fisiologico,
-            "estado": estado_fase,
-            "dias_restantes": dias_restantes,
-            "progreso": progreso
+            item_fase = {
+                "id": f.id,
+                "orden": f.orden,
+                "nombre": f.nombre,
+                "fecha_inicio": f.fecha_inicio.strftime("%Y-%m-%d"),
+                "fecha_fin": f.fecha_fin.strftime("%Y-%m-%d"),
+                "descripcion": f.descripcion,
+                "foco": f.foco_fisiologico,
+                "estado": estado_fase,
+                "dias_restantes": dias_restantes,
+                "progreso": progreso
+            }
+            fases_formateadas.append(item_fase)
+            if estado_fase == "activa":
+                fase_activa_info = item_fase
+
+        if not fase_activa_info and fases_formateadas:
+            fase_activa_info = fases_formateadas[0]
+
+        sesiones = db.query(models.EntrenamientoProgramado).filter(
+            models.EntrenamientoProgramado.usuario_id == 1,
+            models.EntrenamientoProgramado.fecha_programada >= hoy
+        ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(14).all()
+
+        nombre_obj = obj.nombre if obj else "Everesting"
+        fecha_obj = obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else "2027-08-25"
+
+        return {
+            "telemetria": {
+                "ftp": ftp_actual,
+                "peso": 71.0,
+                "lthr": 180,
+                "max_hr": 208,
+                "objetivo": nombre_obj,
+                "fecha_meta": fecha_obj
+            },
+            "macrociclo": {
+                "objetivo": nombre_obj,
+                "fecha_meta": fecha_obj,
+                "total_fases": len(fases_formateadas),
+                "resumen_estrategico": resumen_estrategico,
+                "fase_activa": fase_activa_info,
+                "fases": fases_formateadas
+            },
+            "sesiones": [
+                {
+                    "id": s.id,
+                    "fecha": s.fecha_programada.strftime("%Y-%m-%d"),
+                    "sesion": s.tipo_sesion,
+                    "entorno": s.entorno,
+                    "duracion": s.duracion_minutos_planeada,
+                    "tss": s.tss_planeado,
+                    "estado": s.estado,
+                    "nota": s.motivo_adaptacion
+                } for s in sesiones
+            ]
         }
-        fases_formateadas.append(item_fase)
-        if estado_fase == "activa":
-            fase_activa_info = item_fase
-
-    sesiones = db.query(models.EntrenamientoProgramado).filter(
-        models.EntrenamientoProgramado.usuario_id == 1,
-        models.EntrenamientoProgramado.fecha_programada >= hoy
-    ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(14).all()
-
-    return {
-        "telemetria": {
-            "ftp": ftp_actual,
-            "peso": 71.0,
-            "lthr": 173,
-            "max_hr": 197,
-            "objetivo": obj.nombre if obj else "Everesting",
-            "fecha_meta": obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else "2027-08-25"
-        },
-        "macrociclo": {
-            "objetivo": obj.nombre if obj else "Everesting",
-            "fecha_meta": obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else "2027-08-25",
-            "total_fases": len(fases_formateadas),
-            "resumen_estrategico": resumen_estrategico,
-            "fase_activa": fase_activa_info,
-            "fases": fases_formateadas
-        },
-        "sesiones": [
-            {
-                "id": s.id,
-                "fecha": s.fecha_programada.strftime("%Y-%m-%d"),
-                "sesion": s.tipo_sesion,
-                "entorno": s.entorno,
-                "duracion": s.duracion_minutos_planeada,
-                "tss": s.tss_planeado,
-                "estado": s.estado,
-                "nota": s.motivo_adaptacion
-            } for s in sesiones
-        ]
-    }
+    except Exception as e:
+        print(f"Error protegido en get_calendario: {e}")
+        return {
+            "telemetria": {"ftp": 305, "peso": 71.0, "lthr": 173, "max_hr": 197, "objetivo": "Everesting", "fecha_meta": "2027-08-25"},
+            "macrociclo": {"objetivo": "Everesting", "fecha_meta": "2027-08-25", "total_fases": 0, "resumen_estrategico": None, "fase_activa": None, "fases": []},
+            "sesiones": []
+        }
 
 @app.post("/api/calendario/toggle/{sesion_id}")
 def toggle_estado_sesion(sesion_id: int, db: Session = Depends(get_db)):
