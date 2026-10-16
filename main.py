@@ -336,7 +336,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                                 "type": "string",
                                 "description": "Diagnóstico experto de 2 párrafos analizando el historial real del ciclista (horas, desnivel anual, salida récord, volumen reciente) y la estrategia global hacia el objetivo."
                             },
-                            "fases": {
+                            "bloques": {
                                 "type": "array",
                                 "description": "Lista cronológica y continua de bloques/fases que cubren desde la fecha actual hasta la fecha_meta.",
                                 "items": {
@@ -352,7 +352,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                                 }
                             }
                         },
-                        "required": ["objetivo", "fecha_meta", "resumen_estrategico", "fases"]
+                        "required": ["objetivo", "fecha_meta", "resumen_estrategico", "bloques"]
                     }
                 }
             },
@@ -456,7 +456,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                         objetivo=args.get("objetivo"),
                         fecha_meta=args.get("fecha_meta"),
                         resumen_estrategico=args.get("resumen_estrategico"),
-                        fases=args.get("fases", [])
+                        fases=args.get("fases", []) or args.get("bloques", [])
                     )
                 elif func_name == "actualizar_calendario":
                     resultado = actualizar_calendario(
