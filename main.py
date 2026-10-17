@@ -99,19 +99,19 @@ def normalizar_estructura(bloques, duracion_total):
             limpios.append({
                 "tipo": "intervalos",
                 "etiqueta": etiqueta,
-                "repeticiones": int(_num(b.get("repeticiones"), 1, 1, 30)),
-                "trabajo_min": round(_num(b.get("trabajo_min"), 5, 1, 120)),
-                "trabajo_ftp_pct": round(_num(b.get("trabajo_ftp_pct"), 95, 30, 250)),
+                "repeticiones": int(_num(b.get("repeticiones"), 1, 1, 60)),
+                "trabajo_min": round(_num(b.get("trabajo_min"), 5, 0.1, 240), 2),
+                "trabajo_ftp_pct": round(_num(b.get("trabajo_ftp_pct"), 95, 30, 400)),
                 "trabajo_cadencia": str(b.get("trabajo_cadencia") or "90 rpm")[:20],
-                "recuperacion_min": round(_num(b.get("recuperacion_min"), 3, 0, 60)),
-                "recuperacion_ftp_pct": round(_num(b.get("recuperacion_ftp_pct"), 55, 30, 100)),
+                "recuperacion_min": round(_num(b.get("recuperacion_min"), 3, 0, 120), 2),
+                "recuperacion_ftp_pct": round(_num(b.get("recuperacion_ftp_pct"), 55, 30, 150)),
             })
         else:
             limpios.append({
                 "tipo": "continuo",
                 "etiqueta": etiqueta,
                 "duracion_min": round(_num(b.get("duracion_min"), 10, 1, 600)),
-                "ftp_pct": round(_num(b.get("ftp_pct"), 65, 30, 250)),
+                "ftp_pct": round(_num(b.get("ftp_pct"), 65, 30, 400)),
                 "cadencia": str(b.get("cadencia") or "90 rpm")[:20],
             })
     if not limpios:
@@ -124,14 +124,15 @@ def normalizar_estructura(bloques, duracion_total):
         for b in limpios
     )
     diferencia = int(duracion_total or 0) - total
+    ajuste = round(diferencia)
     if duracion_total and abs(diferencia) > 0.25 * int(duracion_total):
         return None  # estructura incoherente con la duración: mejor que la app use su propia estimación
-    if diferencia != 0:
+    if ajuste != 0:
         continuos = [b for b in limpios if b["tipo"] == "continuo"]
         if continuos:
             mayor = max(continuos, key=lambda b: b["duracion_min"])
-            if mayor["duracion_min"] + diferencia >= 5:
-                mayor["duracion_min"] += diferencia
+            if mayor["duracion_min"] + ajuste >= 5:
+                mayor["duracion_min"] += ajuste
     return limpios
 
 
@@ -152,17 +153,25 @@ def estructura_a_texto_intervals(estructura):
         limpio = str(valor or "").lower().replace("rpm", "").replace(" ", "").strip()
         return f" {limpio}rpm" if limpio else ""
 
+    def tiempo(minutos):
+        """Minutos (admite decimales) -> '5m', '30s' o '1m30s' en formato Intervals.icu."""
+        segundos = round(float(minutos) * 60)
+        mins, segs = divmod(segundos, 60)
+        if mins and segs:
+            return f"{mins}m{segs}s"
+        return f"{mins}m" if mins else f"{segs}s"
+
     lineas = []
     for b in estructura:
         lineas.append("")
         if b.get("tipo") == "intervalos":
             lineas.append(f"{b['etiqueta']} {b['repeticiones']}x")
-            lineas.append(f"- {b['trabajo_min']}m {b['trabajo_ftp_pct']}%{cadencia(b.get('trabajo_cadencia'))}")
+            lineas.append(f"- {tiempo(b['trabajo_min'])} {b['trabajo_ftp_pct']}%{cadencia(b.get('trabajo_cadencia'))}")
             if b["recuperacion_min"] > 0:
-                lineas.append(f"- {b['recuperacion_min']}m {b['recuperacion_ftp_pct']}%")
+                lineas.append(f"- {tiempo(b['recuperacion_min'])} {b['recuperacion_ftp_pct']}%")
         else:
             lineas.append(b["etiqueta"])
-            lineas.append(f"- {b['duracion_min']}m {b['ftp_pct']}%{cadencia(b.get('cadencia'))}")
+            lineas.append(f"- {tiempo(b['duracion_min'])} {b['ftp_pct']}%{cadencia(b.get('cadencia'))}")
     return "\n".join(lineas).strip()
 
 @app.get("/")
@@ -398,6 +407,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     if objetivo: obj.nombre = objetivo
                     if fecha_meta: obj.fecha_meta = datetime.strptime(fecha_meta, "%Y-%m-%d").date()
 
+                resumen_guardado = []
                 for s in sesiones:
                     fecha_obj = datetime.strptime(s["fecha"], "%Y-%m-%d").date()
                     sesion_db = db.query(models.EntrenamientoProgramado).filter(
@@ -422,8 +432,26 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     sesion_db.estructura = json.dumps(estructura, ensure_ascii=False) if estructura else None
                     if s.get("nota_entrenador"):
                         sesion_db.motivo_adaptacion = s.get("nota_entrenador")
+                    resumen_guardado.append({
+                        "fecha": s["fecha"],
+                        "dia": nombre_dia(fecha_obj),
+                        "sesion": sesion_db.tipo_sesion,
+                        "duracion_min": sesion_db.duracion_minutos_planeada,
+                        "tss": sesion_db.tss_planeado,
+                        "bloques_guardados": len(estructura) if estructura else 0,
+                    })
                 db.commit()
-                return {"resultado": "Sesiones del microciclo actualizadas con éxito."}
+                sin_estructura = [r["fecha"] for r in resumen_guardado if r["duracion_min"] > 0 and r["bloques_guardados"] == 0]
+                respuesta_tool = {"resultado": "Sesiones del microciclo actualizadas con éxito.", "guardado": resumen_guardado}
+                if sin_estructura:
+                    print(f"AVISO: sesiones guardadas sin estructura de bloques válida: {sin_estructura}")
+                    respuesta_tool["aviso"] = (
+                        "ATENCIÓN: estas fechas se guardaron SIN estructura válida de bloques (falta 'bloques' o su suma no cuadra con la duración): "
+                        + ", ".join(sin_estructura)
+                        + ". Vuelve a llamar a 'actualizar_calendario' SOLO con esas fechas, repitiendo tipo_sesion, duracion_minutos, tss y nota_entrenador, "
+                        "e incluyendo 'bloques' cuya suma sea EXACTAMENTE duracion_minutos. No respondas al usuario hasta haberlo corregido."
+                    )
+                return respuesta_tool
             except Exception as e:
                 db.rollback()
                 return {"error": str(e)}
@@ -505,10 +533,10 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                                                     "ftp_pct": {"type": "integer", "description": "Solo 'continuo': % del FTP (Z1 <55, Z2 56-75, Z3 76-90, Z4 91-105, Z5 106-120)."},
                                                     "cadencia": {"type": "string", "description": "Solo 'continuo': ej. '90 rpm' o '85-95 rpm'."},
                                                     "repeticiones": {"type": "integer", "description": "Solo 'intervalos': número de repeticiones."},
-                                                    "trabajo_min": {"type": "integer", "description": "Solo 'intervalos': minutos de cada esfuerzo."},
+                                                    "trabajo_min": {"type": "number", "description": "Solo 'intervalos': minutos de cada esfuerzo; admite decimales (0.5 = 30 s)."},
                                                     "trabajo_ftp_pct": {"type": "integer", "description": "Solo 'intervalos': % del FTP del esfuerzo."},
                                                     "trabajo_cadencia": {"type": "string", "description": "Solo 'intervalos': cadencia del esfuerzo, ej. '95-100 rpm'."},
-                                                    "recuperacion_min": {"type": "integer", "description": "Solo 'intervalos': minutos de recuperación entre esfuerzos."},
+                                                    "recuperacion_min": {"type": "number", "description": "Solo 'intervalos': minutos de recuperación entre esfuerzos; admite decimales (0.25 = 15 s)."},
                                                     "recuperacion_ftp_pct": {"type": "integer", "description": "Solo 'intervalos': % del FTP de la recuperación."}
                                                 },
                                                 "required": ["tipo", "etiqueta"]
@@ -546,12 +574,13 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
 
             "2. COHERENCIA ENTRE EL BLOQUE ACTIVO Y LOS ENTRENAMIENTOS SEMANALES:\n"
             "- Antes de programar una semana con 'actualizar_calendario', consulta siempre en qué Fase/Bloque del macrociclo se encuentra hoy llamando a 'consultar_calendario'.\n"
-            "- Cada entrenamiento semanal debe cumplir estrictamente la función fisiológica del bloque activo (ej. si está en 'Recuperar continuidad', prioriza consistencia, cadencia y Z2 sin sobrecargar; si está en 'Fuerza-resistencia en subida', prioriza bloques sostenidos Z3/Sweet Spot a baja cadencia y torque).\n"
+            "- Cada entrenamiento semanal debe responder a la función fisiológica del bloque activo. Los ejemplos son orientativos, no limitantes: tú decides qué series y qué trabajo concreto encajan en cada momento (ej. en 'Recuperar continuidad' suele convenir consistencia, cadencia y Z2; en 'Fuerza-resistencia en subida', bloques sostenidos Z3/Sweet Spot a baja cadencia y torque).\n"
             "- Usa RANGOS de potencia realistas (ej. 200-225W, 65-75% FTP) en lugar de exigir un único vatio fijo.\n"
             f"- Para 'esta semana', las únicas fechas válidas desde hoy hasta el domingo son (con su día de la semana real): [{fechas_validas_str}]. Usa siempre ese día de la semana; no lo deduzcas tú a partir de la fecha.\n"
             "- DISPONIBILIDAD: si Diego te ha dicho cuántas horas tiene cada día (ej. L-J 2 h, S-D 6 h), aplícalo día a día con los días de la semana de arriba. Es un TOPE diario, no un objetivo: en un bloque de recuperación puedes quedarte por debajo si lo justificas en la nota. Un día sin disponibilidad se programa como 'Descanso' con duracion_minutos 0.\n"
             "- VARIEDAD: en una misma semana no repitas dos sesiones iguales. Aunque el bloque sea de Z2, diferencia las sesiones por duración (según la disponibilidad del día), trabajo de cadencia, final en tempo, terreno o progresión, y refléjalo en 'tipo_sesion' con un nombre descriptivo.\n"
-            "- ESTRUCTURA: cada sesión con bici debe incluir 'bloques' (calentamiento, parte principal, enfriamiento) con % de FTP y cadencia reales. La app dibuja exactamente esos bloques y los exporta al ciclocomputador, así que deben coincidir con tu análisis y sumar 'duracion_minutos'. Una sesión Z2 no lleva bloques por encima del 75% del FTP salvo que lo indiques en la nota.\n\n"
+            "- ESTRUCTURA: cada sesión con bici debe incluir 'bloques' (calentamiento, parte principal, enfriamiento) con % de FTP y cadencia reales. La app dibuja exactamente esos bloques y los exporta al ciclocomputador, así que deben coincidir con tu análisis y sumar 'duracion_minutos'. Tú decides libremente qué series e intensidades llevan los bloques en cada momento de la preparación (Z2, Z3, sweet spot, umbral, VO2max, torque, series cortas tipo 30/30, etc.). Para series cortas usa fracciones de minuto (0.5 = 30 s). Solo cuida que el nombre en 'tipo_sesion' describa lo que realmente contienen los bloques.\n"
+            "- COHERENCIA: cuando guardes sesiones, tu respuesta al usuario debe describir EXACTAMENTE lo que aparece en 'guardado' (mismos nombres, duraciones y TSS) y los bloques que enviaste. No cambies cifras ni inventes sesiones en el texto: lo que lee en el chat es lo que verá en la Agenda.\n\n"
 
             "3. FORMATO INNEGOCIABLE PARA PLANIFICACIÓN:\n"
             "- Si diseñas o muestras el Macrociclo, presenta primero el Diagnóstico Estratégico y luego la lista numerada de Fases con sus fechas y propósito fisiológico.\n"
@@ -571,7 +600,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 mensajes.append({"role": role, "content": msg.texto})
         mensajes.append({"role": "user", "content": mensaje.texto})
 
-        for _ in range(4):
+        for _ in range(6):
             respuesta_ia = client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=mensajes,
