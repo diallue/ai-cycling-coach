@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, Response
+from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
 import json
@@ -8,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from groq import Groq
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from database import SessionLocal, engine, Base, get_db
 import models
@@ -16,12 +17,20 @@ import workout_generator
 
 app = FastAPI(title="AI Cycling Coach API")
 
-# 1. Crear tablas nuevas en la BD
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 1. Crear tablas en la BD
 models.Base.metadata.create_all(bind=engine)
 
 
 def asegurar_columnas_nuevas():
-    """Añade de forma idempotente todas las columnas nuevas en tablas existentes (PostgreSQL y SQLite)."""
+    """Añade de forma idempotente todas las columnas nuevas en tablas existentes."""
     migraciones = [
         "ALTER TABLE entrenamientos_programados ADD COLUMN IF NOT EXISTS estructura TEXT",
         "ALTER TABLE entrenamientos_programados ADD COLUMN IF NOT EXISTS tss_real INTEGER",
@@ -41,7 +50,6 @@ def asegurar_columnas_nuevas():
             with engine.begin() as conn:
                 conn.execute(text(sql))
         except Exception:
-            # Fallback para motores sin IF NOT EXISTS (ej. SQLite local)
             sql_simple = sql.replace(" IF NOT EXISTS", "")
             try:
                 with engine.begin() as conn:
@@ -52,14 +60,12 @@ def asegurar_columnas_nuevas():
 
 asegurar_columnas_nuevas()
 
-# 2. Configurar el cliente de Groq
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 ATHLETE_ID = os.getenv("INTERVALS_ATHLETE_ID")
 API_KEY = os.getenv("INTERVALS_API_KEY")
 BASE_URL = "https://intervals.icu/api/v1/athlete"
 
-# Caché en memoria (TTL 5 min) para no saturar Intervals.icu en cada cambio de pestaña
 _TELEMETRIA_CACHE = {"timestamp": None, "data": None}
 
 
@@ -96,6 +102,26 @@ class MensajeChat(BaseModel):
     historial: Optional[List[MensajeHistorial]] = []
 
 
+class CheckinDiarioPayload(BaseModel):
+    fecha: Optional[str] = None
+    sensacion_piernas: str = "normales"  # "frescas", "normales", "cargadas", "agotadas"
+    minutos_disponibles: int = 90
+    entorno: str = "Indoor"
+    notas: Optional[str] = None
+
+
+class DisponibilidadPayload(BaseModel):
+    horas_por_dia: Dict[str, float]  # Ej: {"L": 2, "M": 2, "X": 2, "J": 2, "V": 0, "S": 5, "D": 6}
+
+
+class NuevoObjetivoPayload(BaseModel):
+    nombre: str
+    fecha_meta: str
+    prioridad: str = "B"
+    tipo_evento: Optional[str] = "Gran Fondo"
+    detalles_evento: Optional[str] = None
+
+
 DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 
@@ -112,7 +138,7 @@ def _num(valor, defecto, minimo, maximo):
 
 
 def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
-    """Consulta en tiempo real el perfil del ciclista y su Wellness (HRV, sueño, FC reposo, peso, FTP, LTHR) en Intervals.icu."""
+    """Consulta en tiempo real el perfil del ciclista y su Wellness en Intervals.icu."""
     ahora = datetime.now()
     if (
         not forzar
@@ -136,6 +162,7 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
     hrv_rmssd = None
     resting_hr = None
     sleep_hours = None
+    peso_api = None
     ctl_live = round(act_con_ftp.icu_ctl, 1) if (act_con_ftp and act_con_ftp.icu_ctl) else 0.0
     atl_live = round(act_con_ftp.icu_atl, 1) if (act_con_ftp and act_con_ftp.icu_atl) else 0.0
 
@@ -143,7 +170,6 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
         auth = ("API_KEY", API_KEY)
         try:
             with httpx.Client(timeout=4.5) as client_http:
-                # 1. Perfil fisiológico y zonas desde /athlete/{id}
                 resp_ath = client_http.get(f"{BASE_URL}/{ATHLETE_ID}", auth=auth)
                 if resp_ath.status_code == 200:
                     data = resp_ath.json()
@@ -174,11 +200,11 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
                                 w_prime = int(s["w_prime"])
                             break
 
-                # 2. Wellness últimos 7 días (HRV, sueño, peso en báscula, CTL/ATL actualizados hoy)
                 oldest_w = (ahora - timedelta(days=7)).strftime("%Y-%m-%d")
                 newest_w = ahora.strftime("%Y-%m-%d")
                 resp_well = client_http.get(
-                    f"{BASE_URL}/{ATHLETE_ID}/wellness",
+                    f"{BASE_URL}/{BASE_URL.split('/athlete')[1] if '/athlete/' in BASE_URL else ATHLETE_ID}/wellness"
+                    if False else f"{BASE_URL}/{ATHLETE_ID}/wellness",
                     params={"oldest": oldest_w, "newest": newest_w},
                     auth=auth
                 )
@@ -201,7 +227,6 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
                             if w.get("atl") is not None and atl_live == 0.0:
                                 atl_live = round(float(w["atl"]), 1)
 
-            # Guardar en BD local para persistencia
             if usuario:
                 usuario.ftp_actual = ftp
                 usuario.peso_actual = peso
@@ -232,8 +257,89 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
     return resultado
 
 
+def calcular_niveles_progresion(db: Session, ftp: int):
+    """Calcula los Niveles de Progresión (1.0 - 10.0 estilo TrainerRoad/Xert) a partir de las actividades reales de los últimos 60 días."""
+    hace_60d = datetime.now() - timedelta(days=60)
+    acts = db.query(models.Activity).filter(
+        models.Activity.usuario_id == 1,
+        models.Activity.start_date_local >= hace_60d
+    ).all()
+
+    if not acts:
+        return {
+            "resistencia_z2": 4.0,
+            "tempo_torque": 3.8,
+            "sweet_spot": 4.2,
+            "umbral_ftp": 4.0,
+            "vo2max": 3.5,
+            "durabilidad_kj": 3.8,
+            "distribucion": {"z1_z2_pct": 78, "z3_z4_pct": 16, "z5_pct": 6, "modelo": "Piramidal Base"}
+        }
+
+    max_horas = max(((a.moving_time or 0) / 3600.0) for a in acts)
+    max_desnivel = max((a.total_elevation_gain or 0) for a in acts)
+    max_tss = max((a.tss or 0) for a in acts)
+
+    # Estimación de IF y trabajo mecánico (kJ) en cada salida
+    salidas_ss = 0
+    salidas_umbral = 0
+    salidas_vo2 = 0
+    max_kj = 0.0
+    tiempo_baja = 0.0
+    tiempo_media = 0.0
+    tiempo_alta = 0.0
+
+    for a in acts:
+        dur_h = (a.moving_time or 0) / 3600.0
+        np_act = a.normalized_power or (ftp * 0.68)
+        if_act = np_act / max(150, ftp)
+        kj_act = (np_act * (a.moving_time or 0)) / 1000.0
+        if kj_act > max_kj:
+            max_kj = kj_act
+
+        if if_act < 0.76:
+            tiempo_baja += dur_h
+        elif if_act <= 0.96:
+            tiempo_media += dur_h
+            salidas_ss += 1
+        elif if_act <= 1.04:
+            tiempo_media += dur_h
+            salidas_umbral += 1
+        else:
+            tiempo_alta += dur_h
+            salidas_vo2 += 1
+
+    total_h = max(0.1, tiempo_baja + tiempo_media + tiempo_alta)
+    z1_z2_pct = round((tiempo_baja / total_h) * 100)
+    z3_z4_pct = round((tiempo_media / total_h) * 100)
+    z5_pct = max(0, 100 - z1_z2_pct - z3_z4_pct)
+    modelo = "Polarizado 80/20" if (z1_z2_pct >= 75 and z5_pct >= z3_z4_pct) else "Piramidal Científico"
+
+    lvl_z2 = round(min(10.0, max(2.0, 2.0 + (max_horas / 6.0) * 7.5)), 1)
+    lvl_torque = round(min(10.0, max(2.0, 2.2 + (max_desnivel / 3000.0) * 7.0)), 1)
+    lvl_ss = round(min(10.0, max(2.0, 3.0 + min(5.5, salidas_ss * 0.45) + (max_tss / 300.0) * 1.5)), 1)
+    lvl_ftp = round(min(10.0, max(2.0, 3.0 + min(5.0, salidas_umbral * 0.6) + (salidas_ss * 0.25))), 1)
+    lvl_vo2 = round(min(10.0, max(2.0, 2.8 + min(6.0, salidas_vo2 * 0.8) + (z5_pct * 0.15))), 1)
+    lvl_durabilidad = round(min(10.0, max(2.0, 2.0 + (max_kj / 3500.0) * 7.5)), 1)
+
+    return {
+        "resistencia_z2": lvl_z2,
+        "tempo_torque": lvl_torque,
+        "sweet_spot": lvl_ss,
+        "umbral_ftp": lvl_ftp,
+        "vo2max": lvl_vo2,
+        "durabilidad_kj": lvl_durabilidad,
+        "distribucion": {
+            "z1_z2_pct": z1_z2_pct,
+            "z3_z4_pct": z3_z4_pct,
+            "z5_pct": z5_pct,
+            "modelo": modelo
+        }
+    }
+
+
 def generar_estructura_respaldo(tipo_sesion: str, duracion_total: int):
-    """Si la IA omite los bloques o la suma no cuadra, genera una estructura fisiológica exacta para la sesión."""
+    """Genera una estructura fisiológica exacta cuando se requiere respaldo o adaptación."""
     dur = int(duracion_total or 0)
     if dur <= 0 or "descanso" in (tipo_sesion or "").lower():
         return None
@@ -243,23 +349,37 @@ def generar_estructura_respaldo(tipo_sesion: str, duracion_total: int):
     enf = max(10, round(dur * 0.10))
     cuerpo = max(15, dur - cal - enf)
 
-    if any(k in texto for k in ["vo2", "hiit", "30/15", "30/30", "series"]):
-        reps = max(3, min(6, cuerpo // 8))
-        usado = reps * 8
+    if any(k in texto for k in ["30/15", "ronnestad", "rønnestad", "micro"]):
+        reps = 10 if cuerpo >= 35 else 8
+        usado = round(reps * 0.75)
+        resto_z2 = max(5, cuerpo - usado)
+        return [
+            {"tipo": "continuo", "etiqueta": "Calentamiento progresivo", "duracion_min": cal, "ftp_pct": 62, "cadencia": "90 rpm"},
+            {"tipo": "intervalos", "etiqueta": "Rønnestad 30/15s VO2max", "repeticiones": reps, "trabajo_min": 0.5, "trabajo_ftp_pct": 120, "trabajo_cadencia": "100 rpm", "recuperacion_min": 0.25, "recuperacion_ftp_pct": 50},
+            {"tipo": "continuo", "etiqueta": "Base aeróbica Z2", "duracion_min": resto_z2, "ftp_pct": 66, "cadencia": "90 rpm"},
+            {"tipo": "continuo", "etiqueta": "Enfriamiento Z1", "duracion_min": max(5, dur - (cal + usado + resto_z2)), "ftp_pct": 50, "cadencia": "85 rpm"},
+        ]
+
+    if any(k in texto for k in ["vo2", "hiit", "seiler", "series"]):
+        reps = 4 if cuerpo >= 45 else 3
+        trab_m = 8 if "seiler" in texto or "4x8" in texto else 4
+        rec_m = 4
+        pct_t = 107 if trab_m == 8 else 112
+        usado = reps * (trab_m + rec_m)
         resto_z2 = max(5, cuerpo - usado)
         bloques = [
             {"tipo": "continuo", "etiqueta": "Calentamiento progresivo", "duracion_min": cal, "ftp_pct": 62, "cadencia": "90 rpm"},
-            {"tipo": "intervalos", "etiqueta": "Series VO2max", "repeticiones": reps, "trabajo_min": 4, "trabajo_ftp_pct": 110, "trabajo_cadencia": "95-100 rpm", "recuperacion_min": 4, "recuperacion_ftp_pct": 52},
+            {"tipo": "intervalos", "etiqueta": f"Series VO2max ({reps}x{trab_m}m)", "repeticiones": reps, "trabajo_min": trab_m, "trabajo_ftp_pct": pct_t, "trabajo_cadencia": "95-100 rpm", "recuperacion_min": rec_m, "recuperacion_ftp_pct": 52},
         ]
         if resto_z2 >= 5:
             bloques.append({"tipo": "continuo", "etiqueta": "Rodaje aeróbico Z2", "duracion_min": resto_z2, "ftp_pct": 66, "cadencia": "90 rpm"})
-        bloques.append({"tipo": "continuo", "etiqueta": "Enfriamiento Z1", "duracion_min": dur - (cal + usado + (resto_z2 if resto_z2 >= 5 else 0)), "ftp_pct": 50, "cadencia": "85 rpm"})
+        bloques.append({"tipo": "continuo", "etiqueta": "Enfriamiento Z1", "duracion_min": max(5, dur - (cal + usado + (resto_z2 if resto_z2 >= 5 else 0))), "ftp_pct": 50, "cadencia": "85 rpm"})
         return bloques
 
     if any(k in texto for k in ["sweet", "ss", "umbral", "ftp", "fuerza", "torque", "tempo"]):
         es_torque = "fuerza" in texto or "torque" in texto or "baja cadencia" in texto
-        pct_trab = 88 if es_torque else 92
-        cad_trab = "62-68 rpm" if es_torque else "88-92 rpm"
+        pct_trab = 86 if es_torque else 92
+        cad_trab = "60-65 rpm" if es_torque else "88-92 rpm"
         reps = 3 if cuerpo >= 45 else 2
         trab_min = min(15, max(8, (cuerpo // reps) - 5))
         rec_min = 4
@@ -277,9 +397,16 @@ def generar_estructura_respaldo(tipo_sesion: str, duracion_total: int):
         bloques.append({"tipo": "continuo", "etiqueta": "Enfriamiento suave", "duracion_min": max(5, enf_real), "ftp_pct": 50, "cadencia": "85 rpm"})
         return bloques
 
+    if "recupera" in texto or "regenera" in texto or "z1" in texto:
+        return [
+            {"tipo": "continuo", "etiqueta": "Activación suave Z1", "duracion_min": cal, "ftp_pct": 50, "cadencia": "90 rpm"},
+            {"tipo": "continuo", "etiqueta": "Rodaje regenerativo oxigenación", "duracion_min": cuerpo, "ftp_pct": 56, "cadencia": "92-95 rpm"},
+            {"tipo": "continuo", "etiqueta": "Soltar piernas", "duracion_min": enf, "ftp_pct": 48, "cadencia": "85 rpm"},
+        ]
+
     return [
         {"tipo": "continuo", "etiqueta": "Calentamiento progresivo", "duracion_min": cal, "ftp_pct": 58, "cadencia": "90 rpm"},
-        {"tipo": "continuo", "etiqueta": "Base aeróbica Z2 constante", "duracion_min": cuerpo, "ftp_pct": 68, "cadencia": "90-95 rpm"},
+        {"tipo": "continuo", "etiqueta": "Base aeróbica Z2 (FatMax)", "duracion_min": cuerpo, "ftp_pct": 68, "cadencia": "90-95 rpm"},
         {"tipo": "continuo", "etiqueta": "Enfriamiento regenerativo", "duracion_min": enf, "ftp_pct": 50, "cadencia": "85 rpm"},
     ]
 
@@ -322,7 +449,6 @@ def normalizar_estructura(bloques, duracion_total, tipo_sesion=""):
     if not limpios:
         return generar_estructura_respaldo(tipo_sesion, dur_total_int)
 
-    # Ajustar automáticamente la diferencia de minutos sobre el bloque continuo más largo
     total = sum(
         b["duracion_min"] if b["tipo"] == "continuo"
         else b["repeticiones"] * (b["trabajo_min"] + b["recuperacion_min"])
@@ -396,16 +522,12 @@ def extraer_sesiones_de_json_truncado(error_str: str):
     if "failed_generation" not in error_str:
         return None
     objetos_sesion = []
-    patron = re.compile(r'\{\s*"(?:fecha|entorno|tipo_sesion|duracion_minutos)".*?\n\s*\}', re.DOTALL)
-    # Búsqueda tolerante de bloques de sesión completos por fecha
     partes = error_str.split('"fecha"')
     for p in partes[1:]:
         fragmento = '{"fecha"' + p
-        # Intentamos encontrar el cierre de la sesión
         idx_cierre = fragmento.find('{"fecha"')
         if idx_cierre != -1:
             fragmento = fragmento[:idx_cierre]
-        # Limpiar escapes si vienen dentro de un string de error
         fragmento_limpio = fragmento.replace('\\n', '\n').replace('\\"', '"')
         m_fecha = re.search(r'"fecha"\s*:\s*"(\d{4}-\d{2}-\d{2})"', fragmento_limpio)
         m_tipo = re.search(r'"tipo_sesion"\s*:\s*"([^"]+)"', fragmento_limpio)
@@ -496,7 +618,6 @@ async def sync_activities(db: Session = Depends(get_db)):
             db.add(act_db)
             inserted_count += 1
 
-        # Conciliación automática: si hay una sesión programada ese día, marcarla como Completada
         if act_db.start_date_local and (act_db.moving_time or 0) > 900:
             fecha_act = act_db.start_date_local.date()
             sesion_prog = db.query(models.EntrenamientoProgramado).filter(
@@ -510,7 +631,6 @@ async def sync_activities(db: Session = Depends(get_db)):
                 auto_completed_sessions += 1
 
     db.commit()
-    # Refrescar también el perfil en vivo (FTP, peso, LTHR, HRV)
     obtener_telemetria_intervals_en_vivo(db, forzar=True)
 
     return {
@@ -522,13 +642,169 @@ async def sync_activities(db: Session = Depends(get_db)):
     }
 
 
+@app.post("/api/disponibilidad")
+def guardar_disponibilidad_semanal(payload: DisponibilidadPayload, db: Session = Depends(get_db)):
+    """Guarda en PostgreSQL las horas máximas disponibles por día de la semana (L a D)."""
+    orden = ["L", "M", "X", "J", "V", "S", "D"]
+    partes = []
+    total_h = 0.0
+    for d in orden:
+        h = round(float(payload.horas_por_dia.get(d, 0)), 1)
+        total_h += h
+        h_str = f"{int(h)}h" if h.is_integer() else f"{h}h"
+        partes.append(f"{d}={h_str}")
+    resumen_disp = f"{', '.join(partes)} (Total máx: {round(total_h, 1)}h/sem)"
+
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
+    if usuario:
+        usuario.disponibilidad_json = resumen_disp
+
+    obj = db.query(models.Objetivo).filter(
+        models.Objetivo.usuario_id == 1,
+        models.Objetivo.activo == True
+    ).order_by(models.Objetivo.prioridad.asc()).first()
+    if obj:
+        obj.disponibilidad_semanal = resumen_disp
+
+    db.commit()
+    return {"status": "success", "disponibilidad": resumen_disp}
+
+
+@app.post("/api/objetivos")
+def crear_o_actualizar_objetivo(payload: NuevoObjetivoPayload, db: Session = Depends(get_db)):
+    """Permite añadir objetivos principales (A), secundarios (B) o preparatorios (C) desde la app."""
+    try:
+        fecha_dt = datetime.strptime(payload.fecha_meta.strip(), "%Y-%m-%d").date()
+        prio = (payload.prioridad or "B").upper()[:1]
+        nuevo = models.Objetivo(
+            usuario_id=1,
+            nombre=payload.nombre.strip(),
+            fecha_meta=fecha_dt,
+            prioridad=prio,
+            tipo_evento=payload.tipo_evento,
+            detalles_evento=payload.detalles_evento,
+            activo=True
+        )
+        db.add(nuevo)
+        db.commit()
+        db.refresh(nuevo)
+        return {"status": "success", "id": nuevo.id, "nombre": nuevo.nombre, "prioridad": nuevo.prioridad}
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+
+@app.delete("/api/objetivos/{objetivo_id}")
+def eliminar_objetivo(objetivo_id: int, db: Session = Depends(get_db)):
+    obj = db.query(models.Objetivo).filter(
+        models.Objetivo.id == objetivo_id,
+        models.Objetivo.usuario_id == 1
+    ).first()
+    if not obj:
+        return {"error": "Objetivo no encontrado"}
+    obj.activo = False
+    db.commit()
+    return {"status": "success"}
+
+
+@app.post("/api/checkin")
+def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depends(get_db)):
+    """Adapta al instante el entrenamiento de hoy según la disponibilidad real del día y la fatiga muscular (estilo Join Cycling)."""
+    try:
+        fecha_obj = (
+            datetime.strptime(payload.fecha.strip(), "%Y-%m-%d").date()
+            if payload.fecha else datetime.now().date()
+        )
+        obj = db.query(models.Objetivo).filter(
+            models.Objetivo.usuario_id == 1,
+            models.Objetivo.activo == True
+        ).order_by(models.Objetivo.prioridad.asc()).first()
+
+        sesion_db = db.query(models.EntrenamientoProgramado).filter(
+            models.EntrenamientoProgramado.usuario_id == 1,
+            models.EntrenamientoProgramado.fecha_programada == fecha_obj
+        ).first()
+
+        if not sesion_db:
+            sesion_db = models.EntrenamientoProgramado(
+                usuario_id=1,
+                objetivo_id=obj.id if obj else None,
+                fecha_programada=fecha_obj,
+                estado="Pendiente"
+            )
+            db.add(sesion_db)
+
+        min_disp = max(0, int(payload.minutos_disponibles))
+        sensacion = (payload.sensacion_piernas or "normales").lower()
+        entorno = payload.entorno or "Indoor"
+
+        if min_disp == 0 or sensacion == "agotadas":
+            sesion_db.tipo_sesion = "Descanso Total (Adaptado por Check-in)"
+            sesion_db.duracion_minutos_planeada = 0
+            sesion_db.tss_planeado = 0
+            sesion_db.entorno = entorno
+            sesion_db.estructura = None
+            sesion_db.motivo_adaptacion = (
+                "Check-in diario: Supercompensación y descanso pasivo por fatiga elevada o falta de tiempo hoy."
+            )
+        elif sensacion == "cargadas":
+            dur_real = min(min_disp, 75)
+            sesion_db.tipo_sesion = f"Z1/Z2 Regenerativo Activo ({dur_real}m)"
+            sesion_db.duracion_minutos_planeada = dur_real
+            sesion_db.tss_planeado = round((dur_real / 60.0) * 35)
+            sesion_db.entorno = entorno
+            estructura = generar_estructura_respaldo("Regenerativo Z1", dur_real)
+            sesion_db.estructura = json.dumps(estructura, ensure_ascii=False)
+            sesion_db.motivo_adaptacion = (
+                f"Check-in diario (piernas cargadas): Se reduce la carga neuromúscular a rodaje regenerativo al 50-58% FTP durante {dur_real} min."
+            )
+        elif sensacion == "frescas":
+            if min_disp <= 75:
+                tipo_nuevo = f"Micro-intervalos Rønnestad 30/15s ({min_disp}m)"
+                tss_nuevo = round((min_disp / 60.0) * 78)
+            elif min_disp <= 135:
+                tipo_nuevo = f"Sweet Spot Progresivo + Z2 ({min_disp}m)"
+                tss_nuevo = round((min_disp / 60.0) * 72)
+            else:
+                tipo_nuevo = f"Fondo Z2 + Durabilidad Final Sweet Spot ({min_disp}m)"
+                tss_nuevo = round((min_disp / 60.0) * 64)
+            sesion_db.tipo_sesion = tipo_nuevo
+            sesion_db.duracion_minutos_planeada = min_disp
+            sesion_db.tss_planeado = tss_nuevo
+            sesion_db.entorno = entorno
+            estructura = generar_estructura_respaldo(tipo_nuevo, min_disp)
+            sesion_db.estructura = json.dumps(estructura, ensure_ascii=False)
+            sesion_db.motivo_adaptacion = (
+                f"Check-in diario (piernas frescas, {min_disp} min disponibles en {entorno}): Estímulo de calidad optimizado para aprovechar tu ventana de alta disponibilidad fisiológica."
+            )
+        else:
+            # Sensaciones normales: ajustamos la sesión actual a los minutos exactos disponibles hoy
+            nombre_base = sesion_db.tipo_sesion or "Base Aeróbica Z2 + Tempo"
+            if "descanso" in nombre_base.lower():
+                nombre_base = "Base Aeróbica Z2 (FatMax)"
+            sesion_db.tipo_sesion = f"{nombre_base.split('(')[0].strip()} ({min_disp}m)"
+            sesion_db.duracion_minutos_planeada = min_disp
+            sesion_db.tss_planeado = round((min_disp / 60.0) * 58)
+            sesion_db.entorno = entorno
+            estructura = normalizar_estructura(cargar_estructura(sesion_db.estructura), min_disp, sesion_db.tipo_sesion)
+            sesion_db.estructura = json.dumps(estructura, ensure_ascii=False) if estructura else None
+            sesion_db.motivo_adaptacion = (
+                f"Check-in diario: Duración reajustada exactamente a tus {min_disp} min disponibles hoy en {entorno} manteniendo el estímulo del bloque activo."
+            )
+
+        db.commit()
+        return {"status": "success", "sesion": sesion_db.tipo_sesion, "duracion": sesion_db.duracion_minutos_planeada}
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+
 @app.post("/chat")
 def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
     try:
         hoy_dt = datetime.now()
         hoy_date = hoy_dt.date()
 
-        # 1. Telemetría en vivo desde Intervals.icu + Dossier Histórico en PostgreSQL
         telemetria = obtener_telemetria_intervals_en_vivo(db)
         ftp_actual = telemetria["ftp"]
         peso_actual = telemetria["peso"]
@@ -538,6 +814,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         atl_actual = telemetria["atl"]
         tsb_actual = telemetria["tsb"]
 
+        niveles = calcular_niveles_progresion(db, ftp_actual)
         usuario_db = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
 
         hace_un_ano = hoy_dt - timedelta(days=365)
@@ -561,7 +838,6 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         acts_recientes = [a for a in acts_ano if a.start_date_local and a.start_date_local >= hace_4_semanas]
         media_horas_ultimas_4_sem = round(sum((a.moving_time or 0) for a in acts_recientes) / 3600 / 4, 1)
 
-        # 2. Leer Objetivos Activos (soporta múltiples objetivos A, B y C) y Bloques en BD
         objetivos_activos = db.query(models.Objetivo).filter(
             models.Objetivo.usuario_id == 1,
             models.Objetivo.activo == True
@@ -569,8 +845,8 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
 
         obj_principal = objetivos_activos[0] if objetivos_activos else None
         disponibilidad_guardada = (
-            (obj_principal.disponibilidad_semanal if obj_principal and obj_principal.disponibilidad_semanal else None)
-            or (usuario_db.disponibilidad_json if usuario_db and usuario_db.disponibilidad_json else None)
+            (usuario_db.disponibilidad_json if usuario_db and usuario_db.disponibilidad_json else None)
+            or (obj_principal.disponibilidad_semanal if obj_principal and obj_principal.disponibilidad_semanal else None)
             or "No especificada aún"
         )
 
@@ -593,7 +869,6 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             models.EntrenamientoProgramado.fecha_programada >= hoy_date
         ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(7).all()
 
-        # 3. Herramientas Nativas en Python
         def estructurar_macrociclo(
             objetivo,
             fecha_meta,
@@ -607,7 +882,6 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 fecha_meta_dt = datetime.strptime(fecha_meta.strip(), "%Y-%m-%d").date()
                 prio_limpia = (prioridad or "A").upper()[:1]
 
-                # Si es prioridad A, actualizamos el objetivo A principal; si es B o C, permite coexistir en la temporada
                 obj = db.query(models.Objetivo).filter(
                     models.Objetivo.usuario_id == 1,
                     models.Objetivo.activo == True,
@@ -751,7 +1025,6 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 db.rollback()
                 return {"error": str(e)}
 
-        # 4. Definición de Herramientas para Groq (Compactas para evitar Error 400 y 413)
         tools = [
             {
                 "type": "function",
@@ -794,7 +1067,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "disponibilidad_semanal": {"type": "string", "description": "Si el usuario indicó horas disponibles (ej. 'L-J 2h, S-D 6h'), guárdalas aquí."},
+                            "disponibilidad_semanal": {"type": "string", "description": "Si el usuario indicó horas disponibles, guárdalas aquí."},
                             "sesiones": {
                                 "type": "array",
                                 "items": {
@@ -842,10 +1115,9 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         fechas_validas = [hoy_dt + timedelta(days=i) for i in range(dias_hasta_domingo + 1)]
         fechas_validas_str = ", ".join(f"{d.strftime('%Y-%m-%d')} ({nombre_dia(d)})" for d in fechas_validas)
 
-        # Resumen compacto de la Memoria en BD para inyectar al prompt sin gastar llamadas extra
         if objetivos_activos:
             txt_objetivos = " | ".join(
-                f"[{o.prioridad}] {o.nombre} ({o.fecha_meta})" for o in objetivos_activos
+                f"[Prioridad {o.prioridad}] {o.nombre} ({o.fecha_meta})" for o in objetivos_activos
             )
         else:
             txt_objetivos = "Ninguno configurado aún."
@@ -876,20 +1148,25 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         system_prompt = (
             f"Hoy es {nombre_dia(hoy_dt)} {hoy_dt.strftime('%Y-%m-%d')}.\n"
             "Eres el Director Deportivo y Fisiólogo Jefe de Diego Allue. Diseñas entrenamientos basados en evidencia científica moderna (Seiler, Rønnestad, Issurin, San Millán, Jeukendrup) y en sus datos reales de Intervals.icu.\n\n"
-            "📊 TELEMETRÍA EN VIVO Y DOSSIER HISTÓRICO (INTERVALS.ICU + BD):\n"
+            "📊 TELEMETRÍA EN VIVO Y NIVELES DE PROGRESIÓN (1.0 a 10.0):\n"
             f"- FTP actual: {ftp_actual}W | Peso: {peso_actual} kg ({wkg_actual} W/kg) | LTHR: {lthr_actual} bpm | FC Máx: {telemetria['max_hr']} bpm.\n"
             f"- Carga actual: Fitness (CTL) {ctl_actual} | Fatiga (ATL) {atl_actual} | Frescura (TSB) {tsb_actual}.\n"
             f"{wellness_extra}"
+            f"- Niveles de Progresión del Atleta: Resistencia Z2={niveles['resistencia_z2']}/10 | Torque/Fuerza={niveles['tempo_torque']}/10 | Sweet Spot={niveles['sweet_spot']}/10 | Umbral FTP={niveles['umbral_ftp']}/10 | VO2max={niveles['vo2max']}/10 | Durabilidad={niveles['durabilidad_kj']}/10.\n"
             f"- Últimos 365 días: {horas_ultimo_ano} h y {desnivel_ultimo_ano:,} m desnivel | Salida récord: {salida_mas_larga_h} h ({salida_mas_larga_desnivel:,} m) | Últimas 4 sem: {media_horas_ultimas_4_sem} h/sem.\n\n"
             "🧠 MEMORIA PERSISTENTE EN BASE DE DATOS:\n"
             f"- Objetivos de la temporada: {txt_objetivos}\n"
             f"- Disponibilidad semanal guardada: {disponibilidad_guardada}\n"
             f"- {txt_bloque_hoy}\n"
             f"- Agenda actual en BD: {txt_sesiones_bd}\n\n"
-            "REGLAS DE FUNCIONAMIENTO Y CIENCIA DEL ENTRENAMIENTO:\n"
-            "1. MACROCICLO Y MULTI-OBJETIVO: Si el usuario pide estructurar su plan por bloques y aún NO tienes fecha meta, disponibilidad semanal o qué objetivo es, hazle 3 preguntas breves. En cuanto te responda (o si ya está en la Memoria BD), llama a 'estructurar_macrociclo' guardando también 'disponibilidad_semanal'. El usuario puede tener cualquier objetivo (Gran Fondo, Everesting, XCO, Critérium, Etapas) y añadir objetivos secundarios ('prioridad': 'B' o 'C').\n"
-            f"2. PLANIFICACIÓN SEMANAL: Para programar o adaptar esta semana, las fechas válidas desde hoy hasta el domingo son: [{fechas_validas_str}]. Respeta la disponibilidad diaria del usuario como TOPE diario (los días con 0h prográmalos como 'Descanso' con duracion_minutos=0).\n"
-            "3. REGLA CRÍTICA PARA 'bloques' EN 'actualizar_calendario': Incluye SIEMPRE entre 2 y 4 bloques por sesión (Calentamiento, Bloque Principal agrupando las repeticiones con 'repeticiones': N, segundo bloque opcional, Enfriamiento). NUNCA separes una serie repetida en varios objetos individuales.\n"
+            "🔬 PROTOCOLOS CIENTÍFICOS DE PRESCRIPCIÓN:\n"
+            "- Si el volumen semanal disponible es <8h, aplica distribución Piramidal/Sweet Spot; si es >10h, prioriza distribución Polarizada 80/20 (Seiler).\n"
+            "- Usa protocolos probados: Seiler 4x8m al 106-108% FTP (rec 4m), Rønnestad 30/15s al 120%/50% FTP, Torque específico en subida a 60-65 rpm (85-88% FTP), FatMax/Z2 constante (65-72% FTP a 90-95 rpm) y Durabilidad en fatiga (bloques de Sweet Spot/Umbral en la última hora tras >1.800 kJ de Z2).\n"
+            "- Si hay un objetivo secundario (Prioridad B) en la semana actual, aplica un mini-taper de 3 días previos con activaciones neuromusculares.\n\n"
+            "REGLAS DE EJECUCIÓN:\n"
+            "1. MACROCICLO Y MULTI-OBJETIVO: Si pide estructurar el macrociclo y aún no tienes fecha meta o disponibilidad, haz 3 preguntas breves. Si ya las tienes, llama a 'estructurar_macrociclo'.\n"
+            f"2. PLANIFICACIÓN SEMANAL: Para programar esta semana, las fechas válidas desde hoy hasta el domingo son: [{fechas_validas_str}]. Respeta la disponibilidad diaria como TOPE (días con 0h = 'Descanso', duracion_minutos=0).\n"
+            "3. REGLA CRÍTICA PARA 'bloques' EN 'actualizar_calendario': Incluye SIEMPRE entre 2 y 4 bloques por sesión agrupando series con 'repeticiones': N.\n"
             "4. FORMATO DE RESPUESTA AL PROGRAMAR SEMANA: Después de llamar a 'actualizar_calendario', responde SIEMPRE al usuario con:\n"
             "### 🗓 Planificación Semanal\n"
             "(Tabla Markdown: Día | Entorno | Duración | Sesión | TSS | Enfoque del Bloque)\n\n"
@@ -916,8 +1193,6 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     "messages": mensajes,
                     "max_tokens": 2200,
                 }
-                # En la primera vuelta permitimos herramientas; una vez ejecutada la herramienta,
-                # omitimos 'tools' para ahorrar ~900 tokens y garantizar que redacte la tabla Markdown completa.
                 if not herramienta_ejecutada:
                     kwargs_groq["tools"] = tools
                     kwargs_groq["tool_choice"] = "auto"
@@ -925,7 +1200,6 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 respuesta_ia = client.chat.completions.create(**kwargs_groq)
             except Exception as err_groq:
                 err_str = str(err_groq)
-                # Rescate automático si Groq cortó un JSON largo en actualizar_calendario (Error 400 tool_use_failed)
                 sesiones_rescatadas = extraer_sesiones_de_json_truncado(err_str)
                 if sesiones_rescatadas:
                     res_emergencia = actualizar_calendario(sesiones=sesiones_rescatadas)
@@ -994,6 +1268,7 @@ def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
         telemetria = obtener_telemetria_intervals_en_vivo(db)
         ftp = telemetria["ftp"]
         peso = telemetria["peso"]
+        niveles = calcular_niveles_progresion(db, ftp)
 
         fecha_limite = datetime.now() - timedelta(days=30)
         historial = db.query(models.Activity).filter(
@@ -1018,8 +1293,9 @@ def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
         grafica_atl = [{"value": round(act.icu_atl, 1), "label": act.start_date_local.strftime("%d/%m")} for act in historial]
 
         prompt = (
-            f"El ciclista tiene CTL: {ctl}, ATL: {atl}, TSB: {tsb}, FTP: {ftp}W y peso: {peso}kg ({telemetria['wkg']} W/kg). "
-            "Escribe un diagnóstico fisiológico directo y claro (2 párrafos) sobre su estado de forma, fatiga acumulada y recomendaciones de carga. Sin saludos."
+            f"El ciclista tiene CTL: {ctl}, ATL: {atl}, TSB: {tsb}, FTP: {ftp}W, peso: {peso}kg ({telemetria['wkg']} W/kg). "
+            f"Sus niveles de progresión actuales son Z2={niveles['resistencia_z2']}/10, SweetSpot={niveles['sweet_spot']}/10, VO2max={niveles['vo2max']}/10, Durabilidad={niveles['durabilidad_kj']}/10. "
+            "Escribe un diagnóstico fisiológico directo y claro (2 párrafos) sobre su estado de forma, fortalezas/limitantes y recomendaciones de carga. Sin saludos."
         )
 
         response = client.chat.completions.create(
@@ -1038,6 +1314,9 @@ def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
             "lthr_actual": telemetria["lthr"],
             "max_hr_actual": telemetria["max_hr"],
             "hrv_actual": telemetria.get("hrv"),
+            "sleep_hours": telemetria.get("sleep_hours"),
+            "resting_hr": telemetria.get("resting_hr"),
+            "niveles_progresion": niveles,
             "explicacion_ia": response.choices[0].message.content,
             "grafica_ctl": grafica_ctl,
             "grafica_atl": grafica_atl
@@ -1158,6 +1437,7 @@ def get_calendario(db: Session = Depends(get_db)):
     try:
         hoy = datetime.now().date()
         telemetria = obtener_telemetria_intervals_en_vivo(db)
+        usuario = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
 
         objetivos = db.query(models.Objetivo).filter(
             models.Objetivo.usuario_id == 1,
@@ -1223,8 +1503,12 @@ def get_calendario(db: Session = Depends(get_db)):
             models.EntrenamientoProgramado.fecha_programada >= hoy
         ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(14).all()
 
-        nombre_obj = obj.nombre if obj else "Sin objetivo definido"
+        nombre_obj = obj.nombre if obj else "Configura tu Objetivo"
         fecha_obj = obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else None
+        disp_actual = (
+            (usuario.disponibilidad_json if usuario and usuario.disponibilidad_json else None)
+            or (obj.disponibilidad_semanal if obj else None)
+        )
 
         return {
             "telemetria": {
@@ -1233,6 +1517,7 @@ def get_calendario(db: Session = Depends(get_db)):
                 "lthr": telemetria["lthr"],
                 "max_hr": telemetria["max_hr"],
                 "hrv": telemetria.get("hrv"),
+                "resting_hr": telemetria.get("resting_hr"),
                 "sleep_hours": telemetria.get("sleep_hours"),
                 "objetivo": nombre_obj,
                 "fecha_meta": fecha_obj
@@ -1240,13 +1525,14 @@ def get_calendario(db: Session = Depends(get_db)):
             "macrociclo": {
                 "objetivo": nombre_obj,
                 "fecha_meta": fecha_obj,
-                "disponibilidad": obj.disponibilidad_semanal if obj else None,
+                "disponibilidad": disp_actual,
                 "objetivos_temporada": [
                     {
                         "id": o.id,
                         "nombre": o.nombre,
                         "fecha_meta": o.fecha_meta.strftime("%Y-%m-%d") if o.fecha_meta else None,
-                        "prioridad": o.prioridad or "A"
+                        "prioridad": o.prioridad or "A",
+                        "tipo_evento": o.tipo_evento
                     } for o in objetivos
                 ],
                 "total_fases": len(fases_formateadas),
@@ -1272,8 +1558,8 @@ def get_calendario(db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Error protegido en get_calendario: {e}")
         return {
-            "telemetria": {"ftp": 305, "peso": 71.0, "lthr": 178, "max_hr": 200, "objetivo": "Sin objetivo definido", "fecha_meta": None},
-            "macrociclo": {"objetivo": "Sin objetivo definido", "fecha_meta": None, "total_fases": 0, "resumen_estrategico": None, "fase_activa": None, "fases": []},
+            "telemetria": {"ftp": 305, "peso": 71.0, "lthr": 178, "max_hr": 200, "objetivo": "Configura tu Objetivo", "fecha_meta": None},
+            "macrociclo": {"objetivo": "Configura tu Objetivo", "fecha_meta": None, "total_fases": 0, "resumen_estrategico": None, "fase_activa": None, "fases": []},
             "sesiones": []
         }
 

@@ -561,6 +561,32 @@ export default function CalendarioScreen() {
     }
   };
 
+  // Adaptación rápida del entrenamiento de hoy (Check-in Join Cycling)
+  const adaptarHoyCheckin = async (sensacion: string, minutos: number, entornoElegido: string) => {
+    try {
+      setCargando(true);
+      const res = await fetch(`${API_BASE}/api/checkin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sensacion_piernas: sensacion,
+          minutos_disponibles: minutos,
+          entorno: entornoElegido,
+        }),
+      });
+      if (res.ok) {
+        await cargarCalendario();
+        Alert.alert('Sesión Adaptada ⚡', `Tu entrenamiento de hoy se ha recalculado a ${minutos} min (${sensacion}).`);
+      } else {
+        Alert.alert('Aviso', 'No se pudo adaptar la sesión en el servidor.');
+      }
+    } catch {
+      Alert.alert('Error', 'Fallo de conexión al enviar el check-in.');
+    } finally {
+      setCargando(false);
+    }
+  };
+
   // Exportación 1: Nube (Garmin / Wahoo / Suunto)
   const sincronizarNube = async (id: number) => {
     try {
@@ -906,6 +932,30 @@ export default function CalendarioScreen() {
             )}
           </View>
         </TouchableOpacity>
+
+        {/* ==================== ACCIONES RÁPIDAS: CHECK-IN DIARIO (ESTILO JOIN) ==================== */}
+        <View style={styles.checkinBar}>
+          <TouchableOpacity
+            style={[styles.checkinBtn, { backgroundColor: 'rgba(16,185,129,0.12)', borderColor: '#10b981' }]}
+            onPress={() => adaptarHoyCheckin('frescas', 90, 'Indoor')}
+          >
+            <Text style={[styles.checkinBtnText, { color: '#34d399' }]}>⚡ 1.5h Fresco</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.checkinBtn, { backgroundColor: 'rgba(14,165,233,0.12)', borderColor: '#0ea5e9' }]}
+            onPress={() => adaptarHoyCheckin('normales', 60, 'Indoor')}
+          >
+            <Text style={[styles.checkinBtnText, { color: '#38bdf8' }]}>⏱️ Tengo 1h Hoy</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.checkinBtn, { backgroundColor: 'rgba(244,63,94,0.12)', borderColor: '#f43f5e' }]}
+            onPress={() => adaptarHoyCheckin('cargadas', 50, 'Indoor')}
+          >
+            <Text style={[styles.checkinBtnText, { color: '#fb7185' }]}>🦵 Fatiga (Z1)</Text>
+          </TouchableOpacity>
+        </View>
 
         {/* ==================== 1. DASHBOARD DE CARGA FISIOLÓGICA ==================== */}
         <View style={styles.dashboardPanel}>
@@ -2111,4 +2161,25 @@ const styles = StyleSheet.create({
   coachNoteCardText: { fontSize: 14, color: '#e2e8f0', lineHeight: 21 },
 
   analiticaToggleText: { fontSize: 10, fontWeight: '800', color: '#34d399' },
+
+  checkinBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 6,
+    marginBottom: 14,
+  },
+  checkinBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkinBtnText: {
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: MONO_FONT,
+  },
 });
