@@ -25,7 +25,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Crear tablas en la BD
 models.Base.metadata.create_all(bind=engine)
 
 
@@ -104,14 +103,14 @@ class MensajeChat(BaseModel):
 
 class CheckinDiarioPayload(BaseModel):
     fecha: Optional[str] = None
-    sensacion_piernas: str = "normales"  # "frescas", "normales", "cargadas", "agotadas"
+    sensacion_piernas: str = "normales"
     minutos_disponibles: int = 90
     entorno: str = "Indoor"
     notas: Optional[str] = None
 
 
 class DisponibilidadPayload(BaseModel):
-    horas_por_dia: Dict[str, float]  # Ej: {"L": 2, "M": 2, "X": 2, "J": 2, "V": 0, "S": 5, "D": 6}
+    horas_por_dia: Dict[str, float]
 
 
 class NuevoObjetivoPayload(BaseModel):
@@ -203,8 +202,7 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
                 oldest_w = (ahora - timedelta(days=7)).strftime("%Y-%m-%d")
                 newest_w = ahora.strftime("%Y-%m-%d")
                 resp_well = client_http.get(
-                    f"{BASE_URL}/{BASE_URL.split('/athlete')[1] if '/athlete/' in BASE_URL else ATHLETE_ID}/wellness"
-                    if False else f"{BASE_URL}/{ATHLETE_ID}/wellness",
+                    f"{BASE_URL}/{ATHLETE_ID}/wellness",
                     params={"oldest": oldest_w, "newest": newest_w},
                     auth=auth
                 )
@@ -258,7 +256,7 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
 
 
 def calcular_niveles_progresion(db: Session, ftp: int):
-    """Calcula los Niveles de Progresión (1.0 - 10.0 estilo TrainerRoad/Xert) a partir de las actividades reales de los últimos 60 días."""
+    """Calcula los Niveles de Progresión (1.0 - 10.0 estilo TrainerRoad/Xert) de los últimos 60 días."""
     hace_60d = datetime.now() - timedelta(days=60)
     acts = db.query(models.Activity).filter(
         models.Activity.usuario_id == 1,
@@ -280,7 +278,6 @@ def calcular_niveles_progresion(db: Session, ftp: int):
     max_desnivel = max((a.total_elevation_gain or 0) for a in acts)
     max_tss = max((a.tss or 0) for a in acts)
 
-    # Estimación de IF y trabajo mecánico (kJ) en cada salida
     salidas_ss = 0
     salidas_umbral = 0
     salidas_vo2 = 0
@@ -709,7 +706,7 @@ def eliminar_objetivo(objetivo_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/checkin")
 def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depends(get_db)):
-    """Adapta al instante el entrenamiento de hoy según la disponibilidad real del día y la fatiga muscular (estilo Join Cycling)."""
+    """Adapta al instante el entrenamiento de hoy según la disponibilidad real del día y la fatiga muscular."""
     try:
         fecha_obj = (
             datetime.strptime(payload.fecha.strip(), "%Y-%m-%d").date()
@@ -756,7 +753,7 @@ def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depen
             estructura = generar_estructura_respaldo("Regenerativo Z1", dur_real)
             sesion_db.estructura = json.dumps(estructura, ensure_ascii=False)
             sesion_db.motivo_adaptacion = (
-                f"Check-in diario (piernas cargadas): Se reduce la carga neuromúscular a rodaje regenerativo al 50-58% FTP durante {dur_real} min."
+                f"Check-in diario (piernas cargadas): Se reduce la carga neuromuscular a rodaje regenerativo al 50-58% FTP durante {dur_real} min."
             )
         elif sensacion == "frescas":
             if min_disp <= 75:
@@ -778,7 +775,6 @@ def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depen
                 f"Check-in diario (piernas frescas, {min_disp} min disponibles en {entorno}): Estímulo de calidad optimizado para aprovechar tu ventana de alta disponibilidad fisiológica."
             )
         else:
-            # Sensaciones normales: ajustamos la sesión actual a los minutos exactos disponibles hoy
             nombre_base = sesion_db.tipo_sesion or "Base Aeróbica Z2 + Tempo"
             if "descanso" in nombre_base.lower():
                 nombre_base = "Base Aeróbica Z2 (FatMax)"
@@ -823,7 +819,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         acts_ano = db.query(models.Activity).filter(
             models.Activity.usuario_id == 1,
             models.Activity.start_date_local >= hace_un_ano
-        ).all()
+        ).order_by(models.Activity.start_date_local.desc()).all()
 
         horas_ultimo_ano = round(sum((a.moving_time or 0) for a in acts_ano) / 3600, 1)
         desnivel_ultimo_ano = int(sum((a.total_elevation_gain or 0) for a in acts_ano))
@@ -837,6 +833,20 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
 
         acts_recientes = [a for a in acts_ano if a.start_date_local and a.start_date_local >= hace_4_semanas]
         media_horas_ultimas_4_sem = round(sum((a.moving_time or 0) for a in acts_recientes) / 3600 / 4, 1)
+
+        # Últimas 5 salidas reales en bici para que el Coach pueda analizarlas si el usuario pregunta
+        ultimas_5_salidas = []
+        for a in acts_ano[:5]:
+            fecha_a = a.start_date_local.strftime("%Y-%m-%d") if a.start_date_local else "N/A"
+            dur_m = round((a.moving_time or 0) / 60)
+            km_a = round((a.distance or 0) / 1000, 1)
+            desn_a = int(a.total_elevation_gain or 0)
+            np_a = int(a.normalized_power or 0)
+            tss_a = int(a.tss or 0)
+            ultimas_5_salidas.append(
+                f"{fecha_a} '{a.name}': {dur_m}m, {km_a}km, +{desn_a}m, NP {np_a}W, {tss_a} TSS"
+            )
+        txt_ultimas_salidas = " | ".join(ultimas_5_salidas) if ultimas_5_salidas else "Sin salidas recientes sincronizadas."
 
         objetivos_activos = db.query(models.Objetivo).filter(
             models.Objetivo.usuario_id == 1,
@@ -1153,7 +1163,8 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             f"- Carga actual: Fitness (CTL) {ctl_actual} | Fatiga (ATL) {atl_actual} | Frescura (TSB) {tsb_actual}.\n"
             f"{wellness_extra}"
             f"- Niveles de Progresión del Atleta: Resistencia Z2={niveles['resistencia_z2']}/10 | Torque/Fuerza={niveles['tempo_torque']}/10 | Sweet Spot={niveles['sweet_spot']}/10 | Umbral FTP={niveles['umbral_ftp']}/10 | VO2max={niveles['vo2max']}/10 | Durabilidad={niveles['durabilidad_kj']}/10.\n"
-            f"- Últimos 365 días: {horas_ultimo_ano} h y {desnivel_ultimo_ano:,} m desnivel | Salida récord: {salida_mas_larga_h} h ({salida_mas_larga_desnivel:,} m) | Últimas 4 sem: {media_horas_ultimas_4_sem} h/sem.\n\n"
+            f"- Últimos 365 días: {horas_ultimo_ano} h y {desnivel_ultimo_ano:,} m desnivel | Salida récord: {salida_mas_larga_h} h ({salida_mas_larga_desnivel:,} m) | Últimas 4 sem: {media_horas_ultimas_4_sem} h/sem.\n"
+            f"- Últimas 5 salidas realizadas en bici: {txt_ultimas_salidas}\n\n"
             "🧠 MEMORIA PERSISTENTE EN BASE DE DATOS:\n"
             f"- Objetivos de la temporada: {txt_objetivos}\n"
             f"- Disponibilidad semanal guardada: {disponibilidad_guardada}\n"
@@ -1436,7 +1447,9 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
 def get_calendario(db: Session = Depends(get_db)):
     try:
         hoy = datetime.now().date()
+        inicio_semana_actual = hoy - timedelta(days=hoy.weekday())  # Lunes de la semana actual
         telemetria = obtener_telemetria_intervals_en_vivo(db)
+        ftp_ref = max(150, telemetria["ftp"])
         usuario = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
 
         objetivos = db.query(models.Objetivo).filter(
@@ -1498,10 +1511,53 @@ def get_calendario(db: Session = Depends(get_db)):
         if not fase_activa_info and fases_formateadas:
             fase_activa_info = fases_formateadas[0]
 
+        # Incluimos desde el lunes de la semana actual para que el microciclo L-D nunca pierda los días ya pasados
         sesiones = db.query(models.EntrenamientoProgramado).filter(
             models.EntrenamientoProgramado.usuario_id == 1,
-            models.EntrenamientoProgramado.fecha_programada >= hoy
+            models.EntrenamientoProgramado.fecha_programada >= inicio_semana_actual
         ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(14).all()
+
+        # Historial de las últimas 35 actividades reales completadas en Intervals.icu
+        actividades_db = db.query(models.Activity).filter(
+            models.Activity.usuario_id == 1,
+            models.Activity.start_date_local.isnot(None)
+        ).order_by(models.Activity.start_date_local.desc()).limit(35).all()
+
+        # Mapa fecha -> actividad real para cruzar Planeado vs Completado en la misma tarjeta
+        mapa_act_por_fecha = {}
+        actividades_realizadas = []
+        for a in actividades_db:
+            fecha_str = a.start_date_local.strftime("%Y-%m-%d")
+            dur_min = round((a.moving_time or 0) / 60)
+            dist_km = round((a.distance or 0) / 1000.0, 1)
+            desn_m = int(round(a.total_elevation_gain or 0))
+            np_w = int(round(a.normalized_power or 0))
+            hr_avg = int(round(a.average_heartrate or 0))
+            tss_val = int(round(a.tss or 0))
+            if_val = round(np_w / ftp_ref, 2) if np_w > 0 else 0.0
+            kj_val = int(round((np_w * (a.moving_time or 0)) / 1000.0)) if np_w > 0 else 0
+            ef_val = round(np_w / hr_avg, 2) if (np_w > 0 and hr_avg > 0) else None
+
+            item_act = {
+                "id": str(a.id),
+                "fecha": fecha_str,
+                "nombre": a.name or "Salida en bicicleta",
+                "tipo": a.type or "Ride",
+                "duracion_min": dur_min,
+                "distancia_km": dist_km,
+                "desnivel_m": desn_m,
+                "np": np_w,
+                "if_val": if_val,
+                "hr_avg": hr_avg,
+                "tss": tss_val,
+                "kj": kj_val,
+                "ef": ef_val,
+                "ctl": round(a.icu_ctl, 1) if a.icu_ctl else None,
+                "atl": round(a.icu_atl, 1) if a.icu_atl else None,
+            }
+            actividades_realizadas.append(item_act)
+            if fecha_str not in mapa_act_por_fecha:
+                mapa_act_por_fecha[fecha_str] = item_act
 
         nombre_obj = obj.nombre if obj else "Configura tu Objetivo"
         fecha_obj = obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else None
@@ -1548,19 +1604,26 @@ def get_calendario(db: Session = Depends(get_db)):
                     "entorno": s.entorno,
                     "duracion": s.duracion_minutos_planeada,
                     "tss": s.tss_planeado,
-                    "tss_real": getattr(s, "tss_real", None),
-                    "estado": s.estado,
+                    "tss_real": getattr(s, "tss_real", None) or (
+                        mapa_act_por_fecha.get(s.fecha_programada.strftime("%Y-%m-%d"), {}).get("tss")
+                    ),
+                    "actividad_real": mapa_act_por_fecha.get(s.fecha_programada.strftime("%Y-%m-%d")),
+                    "estado": "Completado" if (
+                        s.estado == "Completado" or s.fecha_programada.strftime("%Y-%m-%d") in mapa_act_por_fecha
+                    ) else s.estado,
                     "nota": s.motivo_adaptacion,
                     "estructura": cargar_estructura(getattr(s, "estructura", None))
                 } for s in sesiones
-            ]
+            ],
+            "actividades_realizadas": actividades_realizadas
         }
     except Exception as e:
         print(f"Error protegido en get_calendario: {e}")
         return {
             "telemetria": {"ftp": 305, "peso": 71.0, "lthr": 178, "max_hr": 200, "objetivo": "Configura tu Objetivo", "fecha_meta": None},
             "macrociclo": {"objetivo": "Configura tu Objetivo", "fecha_meta": None, "total_fases": 0, "resumen_estrategico": None, "fase_activa": None, "fases": []},
-            "sesiones": []
+            "sesiones": [],
+            "actividades_realizadas": []
         }
 
 

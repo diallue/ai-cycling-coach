@@ -14,7 +14,7 @@ import { LineChart } from 'react-native-gifted-charts';
 import { Ionicons } from '@expo/vector-icons';
 
 const screenWidth = Dimensions.get('window').width;
-const API_BASE = 'https://ai-cycling-coach.onrender.com';
+const API_BASE = 'https://ai-cycling-coach-822a.onrender.com';
 
 const POWER_ZONES = [
   { z: 'Z1', name: 'Recuperación Activa', minPct: 0, maxPct: 55, color: '#94a3b8' },
