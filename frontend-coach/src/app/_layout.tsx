@@ -12,7 +12,7 @@ export default function AppLayout() {
           backgroundColor: '#090d16',
           borderTopColor: '#1e293b',
           borderTopWidth: 1,
-          height: Platform.OS === 'ios' ? 86 : 66,
+          height: Platform.OS === 'ios' ? 86 : 86,
           paddingBottom: Platform.OS === 'ios' ? 26 : 10,
           paddingTop: 8,
         },

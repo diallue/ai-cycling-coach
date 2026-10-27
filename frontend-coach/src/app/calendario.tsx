@@ -732,7 +732,7 @@ export default function CalendarioScreen() {
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
               <View style={[styles.rtIndicatorDot, { backgroundColor: rt.color }]} />
               <Text style={styles.rtOverline} numberOfLines={1}>
-                REST OR TRAIN • READINESS HOY
+                READINESS HOY
               </Text>
             </View>
             <View style={[styles.rtVerdictBadge, { backgroundColor: `${rt.color}22`, borderColor: rt.color }]}>

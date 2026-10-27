@@ -116,7 +116,7 @@ export default function RendimientoScreen() {
         {/* CABECERA */}
         <View style={styles.headerRow}>
           <View>
-            <Text style={styles.eyebrow}>PERFORMANCE LAB • WKO5 / INTERVALS.ICU</Text>
+            <Text style={styles.eyebrow}>PERFORMANCE LAB</Text>
             <Text style={styles.headerTitle}>Fisiología y Carga</Text>
           </View>
           <TouchableOpacity style={styles.syncBtn} onPress={sincronizarConIntervals} disabled={sincronizando}>
@@ -387,7 +387,7 @@ const styles = StyleSheet.create({
     gap: 6,
     marginBottom: 12,
   },
-  cardTitle: { color: '#f8fafc', fontSize: 15, fontWeight: '800' },
+  cardTitle: { color: '#f8fafc', fontSize: 15, fontWeight: '300' },
   legendRow: { flexDirection: 'row', gap: 12 },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   legendDot: { width: 8, height: 8, borderRadius: 4 },

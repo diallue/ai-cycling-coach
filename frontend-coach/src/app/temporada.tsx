@@ -183,9 +183,6 @@ export default function TemporadaScreen() {
             <Text style={styles.brandTitle}>
               TEMPORADA <Text style={{ color: '#34d399' }}>& HISTORIAL</Text>
             </Text>
-            <Text style={styles.brandSubtitle} numberOfLines={1}>
-              {macrociclo.disponibilidad || 'Configura tus objetivos A/B/C y tu disponibilidad'}
-            </Text>
           </View>
         </View>
 

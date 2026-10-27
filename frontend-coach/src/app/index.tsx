@@ -254,7 +254,7 @@ export default function ChatCoachScreen() {
             </View>
           </View>
           <Text style={styles.headerSub} numberOfLines={1}>
-            Sincronizado con tu FTP, Zonas Coggan y PostgreSQL
+            Sincronizado con tu FTP, Zonas Coggan y datos
           </Text>
         </View>
       </View>
