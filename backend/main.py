@@ -1053,7 +1053,8 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     sesion_db.tss_planeado = int(s.get("tss", round(dur_min * 0.65))) if dur_min > 0 else 0
                     sesion_db.estado = s.get("estado", "Pendiente")
 
-                    estructura = normalizar_estructura(s.get("bloques"), dur_min, tipo_ses)
+                    # AL QUITAR BLOQUES DEL JSON, USAMOS SIEMPRE LA GENERACIÓN AUTOMÁTICA SEGÚN EL TÍTULO
+                    estructura = normalizar_estructura([], dur_min, tipo_ses)
                     sesion_db.estructura = json.dumps(estructura, ensure_ascii=False) if estructura else None
                     if s.get("nota_entrenador"):
                         sesion_db.motivo_adaptacion = s.get("nota_entrenador")
@@ -1076,12 +1077,13 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 db.rollback()
                 return {"error": str(e)}
 
+        # ESQUEMA SIMPLIFICADO: Eliminado el array anidado 'bloques' de actualizar_calendario
         tools = [
             {
                 "type": "function",
                 "function": {
                     "name": "estructurar_macrociclo",
-                    "description": "Crea o actualiza un objetivo de la temporada (prioridad A, B o C) y su plan completo de preparación por bloques/fases desde hoy hasta fecha_meta.",
+                    "description": "Crea o actualiza un objetivo de la temporada y su plan completo de preparación.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1113,7 +1115,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 "type": "function",
                 "function": {
                     "name": "actualizar_calendario",
-                    "description": "Guarda o modifica en la base de datos las sesiones de entrenamiento de la semana.",
+                    "description": "Guarda en la base de datos las sesiones de la semana. EL MOTOR DE PYTHON GENERARÁ LOS BLOQUES INTERNOS BASÁNDOSE EN EL TÍTULO.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1124,32 +1126,11 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                                     "type": "object",
                                     "properties": {
                                         "fecha": {"type": "string", "description": "YYYY-MM-DD"},
-                                        "tipo_sesion": {"type": "string", "description": "Título descriptivo (ej. 'Sweet Spot Progresivo + Z2', 'Z2 + Cadencia Drills', 'Z2 + Torque 65rpm')."},
+                                        "tipo_sesion": {"type": "string", "description": "Título MUY detallado para que Python cree los bloques. Ej: 'Rønnestad 30/15s', 'Sweet Spot Progresivo', 'Z2 + Fuerza Torque 65rpm', 'Z2 FatMax'."},
                                         "entorno": {"type": "string", "description": "'Indoor' o 'Outdoor'"},
                                         "duracion_minutos": {"type": "integer"},
                                         "tss": {"type": "integer"},
-                                        "nota_entrenador": {"type": "string"},
-                                        "bloques": {
-                                            "type": "array",
-                                            "description": "Opcional: Máximo 3 bloques por sesión.",
-                                            "items": {
-                                                "type": "object",
-                                                "properties": {
-                                                    "tipo": {"type": "string", "enum": ["continuo", "intervalos"]},
-                                                    "etiqueta": {"type": "string"},
-                                                    "duracion_min": {"type": "integer"},
-                                                    "ftp_pct": {"type": "integer"},
-                                                    "cadencia": {"type": "string"},
-                                                    "repeticiones": {"type": "integer"},
-                                                    "trabajo_min": {"type": "number"},
-                                                    "trabajo_ftp_pct": {"type": "integer"},
-                                                    "trabajo_cadencia": {"type": "string"},
-                                                    "recuperacion_min": {"type": "number"},
-                                                    "recuperacion_ftp_pct": {"type": "integer"}
-                                                },
-                                                "required": ["tipo", "etiqueta"]
-                                            }
-                                        }
+                                        "nota_entrenador": {"type": "string"}
                                     },
                                     "required": ["fecha", "tipo_sesion", "duracion_minutos", "tss", "nota_entrenador"]
                                 }
@@ -1193,7 +1174,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             f"- Agenda actual: {txt_sesiones_bd}\n\n"
             "REGLAS DE EJECUCIÓN:\n"
             f"1. Para programar esta semana, usa las fechas desde hoy hasta el domingo: [{fechas_validas_str}].\n"
-            "2. En 'actualizar_calendario', para que el JSON sea ligero y NUNCA supere el límite de tokens, pon como máximo 3 elementos en 'bloques' por sesión (Calentamiento, Bloque Principal agrupando con 'repeticiones', Enfriamiento) u omite 'bloques' y deja que el motor fisiológico lo construya a partir de 'tipo_sesion' y 'duracion_minutos'.\n"
+            "2. En 'actualizar_calendario', NO DEBES ENVIAR JSON DE BLOQUES. El motor de Python los generará. Tu única misión es dar un 'tipo_sesion' descriptivo (ej. 'VO2max 4x4m', 'Torque 65rpm', 'Z2 FatMax') para que el backend sepa qué estructura crear.\n"
             "3. Tras llamar a 'actualizar_calendario', presenta SIEMPRE:\n"
             "### 🗓 Planificación Semanal\n(Tabla Markdown)\n"
             f"### 🔬 Análisis Fisiológico y Ejecución (FTP {ftp_actual}W)\n"
@@ -1246,7 +1227,12 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
 
             for tool_call in msg_ia.tool_calls:
                 func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    if ultimo_guardado:
+                        return {"respuesta": formatear_respuesta_semanal_markdown(ultimo_guardado, ftp_actual)}
+                    return {"error_interno": "La IA se atascó al procesar los datos. Inténtalo de nuevo."}
 
                 if func_name == "estructurar_macrociclo":
                     resultado = estructurar_macrociclo(
