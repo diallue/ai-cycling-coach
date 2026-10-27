@@ -1447,9 +1447,7 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
 def get_calendario(db: Session = Depends(get_db)):
     try:
         hoy = datetime.now().date()
-        inicio_semana_actual = hoy - timedelta(days=hoy.weekday())  # Lunes de la semana actual
         telemetria = obtener_telemetria_intervals_en_vivo(db)
-        ftp_ref = max(150, telemetria["ftp"])
         usuario = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
 
         objetivos = db.query(models.Objetivo).filter(
@@ -1511,32 +1509,36 @@ def get_calendario(db: Session = Depends(get_db)):
         if not fase_activa_info and fases_formateadas:
             fase_activa_info = fases_formateadas[0]
 
-        # Incluimos desde el lunes de la semana actual para que el microciclo L-D nunca pierda los días ya pasados
+        # Mostrar sesiones desde el inicio de la semana actual (lunes) + próximos 14 días
+        inicio_semana = hoy - timedelta(days=hoy.weekday())
         sesiones = db.query(models.EntrenamientoProgramado).filter(
             models.EntrenamientoProgramado.usuario_id == 1,
-            models.EntrenamientoProgramado.fecha_programada >= inicio_semana_actual
+            models.EntrenamientoProgramado.fecha_programada >= inicio_semana
         ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(14).all()
 
-        # Historial de las últimas 35 actividades reales completadas en Intervals.icu
-        actividades_db = db.query(models.Activity).filter(
+        # Actividades reales de los últimos 30 días desde PostgreSQL (sincronizadas con Intervals.icu)
+        hace_30d = datetime.now() - timedelta(days=30)
+        acts_recientes = db.query(models.Activity).filter(
             models.Activity.usuario_id == 1,
-            models.Activity.start_date_local.isnot(None)
+            models.Activity.start_date_local >= hace_30d
         ).order_by(models.Activity.start_date_local.desc()).limit(35).all()
 
-        # Mapa fecha -> actividad real para cruzar Planeado vs Completado en la misma tarjeta
-        mapa_act_por_fecha = {}
-        actividades_realizadas = []
-        for a in actividades_db:
+        mapa_actividades_por_fecha = {}
+        actividades_formateadas = []
+        ftp_ref = max(150, telemetria["ftp"])
+
+        for a in acts_recientes:
+            if not a.start_date_local:
+                continue
             fecha_str = a.start_date_local.strftime("%Y-%m-%d")
             dur_min = round((a.moving_time or 0) / 60)
             dist_km = round((a.distance or 0) / 1000.0, 1)
-            desn_m = int(round(a.total_elevation_gain or 0))
-            np_w = int(round(a.normalized_power or 0))
-            hr_avg = int(round(a.average_heartrate or 0))
-            tss_val = int(round(a.tss or 0))
-            if_val = round(np_w / ftp_ref, 2) if np_w > 0 else 0.0
-            kj_val = int(round((np_w * (a.moving_time or 0)) / 1000.0)) if np_w > 0 else 0
-            ef_val = round(np_w / hr_avg, 2) if (np_w > 0 and hr_avg > 0) else None
+            desnivel_m = int(a.total_elevation_gain or 0)
+            np_w = int(a.normalized_power or 0)
+            hr_avg = int(a.average_heartrate or 0)
+            tss_act = int(round(a.tss or 0))
+            if_act = round(np_w / ftp_ref, 2) if np_w > 0 else 0.0
+            kj_act = int(round((np_w * (a.moving_time or 0)) / 1000.0)) if np_w > 0 else 0
 
             item_act = {
                 "id": str(a.id),
@@ -1545,19 +1547,58 @@ def get_calendario(db: Session = Depends(get_db)):
                 "tipo": a.type or "Ride",
                 "duracion_min": dur_min,
                 "distancia_km": dist_km,
-                "desnivel_m": desn_m,
+                "desnivel_m": desnivel_m,
+                "tss": tss_act,
                 "np": np_w,
-                "if_val": if_val,
+                "if_val": if_act,
                 "hr_avg": hr_avg,
-                "tss": tss_val,
-                "kj": kj_val,
-                "ef": ef_val,
-                "ctl": round(a.icu_ctl, 1) if a.icu_ctl else None,
-                "atl": round(a.icu_atl, 1) if a.icu_atl else None,
+                "kj": kj_act,
             }
-            actividades_realizadas.append(item_act)
-            if fecha_str not in mapa_act_por_fecha:
-                mapa_act_por_fecha[fecha_str] = item_act
+            actividades_formateadas.append(item_act)
+            # Si hubo más de una actividad ese día, conservamos la de mayor carga (TSS/duración)
+            if fecha_str not in mapa_actividades_por_fecha or dur_min > mapa_actividades_por_fecha[fecha_str]["duracion_min"]:
+                mapa_actividades_por_fecha[fecha_str] = item_act
+
+        # Algoritmo científico "REST OR TRAIN" (Readiness Score 0-100)
+        ctl_v = telemetria["ctl"]
+        atl_v = telemetria["atl"]
+        tsb_v = telemetria["tsb"]
+        acwr = round(atl_v / max(15.0, ctl_v), 2) if ctl_v > 0 else 1.0
+
+        score = 75
+        if tsb_v >= 5:
+            score += 15
+        elif tsb_v >= -10:
+            score += 5
+        elif tsb_v >= -22:
+            score -= 12
+        else:
+            score -= 30
+
+        if acwr > 1.35:
+            score -= 15
+        elif 0.85 <= acwr <= 1.20:
+            score += 5
+
+        if telemetria.get("sleep_hours"):
+            if telemetria["sleep_hours"] >= 7.5:
+                score += 8
+            elif telemetria["sleep_hours"] < 6.0:
+                score -= 15
+
+        score = max(15, min(99, score))
+        if score >= 75:
+            veredicto_rt = "TRAIN HARD"
+            color_rt = "#10b981"
+            consejo_rt = f" Luz verde fisiológica ({score}%). TSB en {tsb_v} y ratio carga aguda/crónica en {acwr}. Día óptimo para completar series de alta intensidad o bloque clave."
+        elif score >= 48:
+            veredicto_rt = "TRAIN MODERATE"
+            color_rt = "#f59e0b"
+            consejo_rt = f" Carga acumulada moderada ({score}%). TSB en {tsb_v} (ACWR {acwr}). Prioriza precisión aeróbica en Z2/Z3 evitando esfuerzos glucolíticos máximos."
+        else:
+            veredicto_rt = "REST OR Z1"
+            color_rt = "#f43f5e"
+            consejo_rt = f" Fatiga aguda alta ({score}%). TSB en {tsb_v} (ACWR {acwr}). Tu sistema nervioso necesita asimilar carga: descansa o convierte hoy a Z1 Regenerativo."
 
         nombre_obj = obj.nombre if obj else "Configura tu Objetivo"
         fecha_obj = obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else None
@@ -1566,17 +1607,47 @@ def get_calendario(db: Session = Depends(get_db)):
             or (obj.disponibilidad_semanal if obj else None)
         )
 
+        sesiones_salida = []
+        for s in sesiones:
+            f_str = s.fecha_programada.strftime("%Y-%m-%d")
+            act_asociada = mapa_actividades_por_fecha.get(f_str)
+            estado_final = "Completado" if (s.estado == "Completado" or act_asociada) else s.estado
+            tss_real_final = getattr(s, "tss_real", None) or (act_asociada["tss"] if act_asociada else None)
+            sesiones_salida.append({
+                "id": s.id,
+                "fecha": f_str,
+                "sesion": s.tipo_sesion,
+                "entorno": s.entorno,
+                "duracion": s.duracion_minutos_planeada,
+                "tss": s.tss_planeado,
+                "tss_real": tss_real_final,
+                "estado": estado_final,
+                "nota": s.motivo_adaptacion,
+                "estructura": cargar_estructura(getattr(s, "estructura", None)),
+                "actividad_real": act_asociada
+            })
+
         return {
             "telemetria": {
                 "ftp": telemetria["ftp"],
                 "peso": telemetria["peso"],
                 "lthr": telemetria["lthr"],
                 "max_hr": telemetria["max_hr"],
+                "ctl": ctl_v,
+                "atl": atl_v,
+                "tsb": tsb_v,
                 "hrv": telemetria.get("hrv"),
                 "resting_hr": telemetria.get("resting_hr"),
                 "sleep_hours": telemetria.get("sleep_hours"),
                 "objetivo": nombre_obj,
-                "fecha_meta": fecha_obj
+                "fecha_meta": fecha_obj,
+                "rest_or_train": {
+                    "score": score,
+                    "veredicto": veredicto_rt,
+                    "color": color_rt,
+                    "acwr": acwr,
+                    "consejo": consejo_rt
+                }
             },
             "macrociclo": {
                 "objetivo": nombre_obj,
@@ -1596,26 +1667,8 @@ def get_calendario(db: Session = Depends(get_db)):
                 "fase_activa": fase_activa_info,
                 "fases": fases_formateadas
             },
-            "sesiones": [
-                {
-                    "id": s.id,
-                    "fecha": s.fecha_programada.strftime("%Y-%m-%d"),
-                    "sesion": s.tipo_sesion,
-                    "entorno": s.entorno,
-                    "duracion": s.duracion_minutos_planeada,
-                    "tss": s.tss_planeado,
-                    "tss_real": getattr(s, "tss_real", None) or (
-                        mapa_act_por_fecha.get(s.fecha_programada.strftime("%Y-%m-%d"), {}).get("tss")
-                    ),
-                    "actividad_real": mapa_act_por_fecha.get(s.fecha_programada.strftime("%Y-%m-%d")),
-                    "estado": "Completado" if (
-                        s.estado == "Completado" or s.fecha_programada.strftime("%Y-%m-%d") in mapa_act_por_fecha
-                    ) else s.estado,
-                    "nota": s.motivo_adaptacion,
-                    "estructura": cargar_estructura(getattr(s, "estructura", None))
-                } for s in sesiones
-            ],
-            "actividades_realizadas": actividades_realizadas
+            "sesiones": sesiones_salida,
+            "actividades_realizadas": actividades_formateadas
         }
     except Exception as e:
         print(f"Error protegido en get_calendario: {e}")
