@@ -9,7 +9,6 @@ import {
   Alert,
   Modal,
   Platform,
-  TextInput,
   RefreshControl,
 } from 'react-native';
 import { useFocusEffect } from 'expo-router';
@@ -19,9 +18,6 @@ import * as Sharing from 'expo-sharing';
 const API_BASE = 'https://ai-cycling-coach-822a.onrender.com';
 const MONO_FONT = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
-// ============================================================================
-// 1. DEFINICIÓN CIENTÍFICA DE ZONAS DE COGGAN (Z1-Z7) Y ZONAS FC (LTHR)
-// ============================================================================
 const COGGAN_ZONES = [
   { id: 'Z1', name: 'Recuperación Activa', minPct: 0, maxPct: 55, color: '#64748b', bgBadge: 'rgba(100,116,139,0.2)', desc: 'Regeneración muscular, flujo sanguíneo sin fatiga autonómica.' },
   { id: 'Z2', name: 'Resistencia Aeróbica', minPct: 56, maxPct: 75, color: '#0ea5e9', bgBadge: 'rgba(14,165,233,0.18)', desc: 'Base aeróbica, biogénesis mitocondrial y oxidación de grasas (FatMax).' },
@@ -42,15 +38,6 @@ const HR_ZONES = [
 
 const DIAS_SEMANA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const DIAS_CORTO = ['D', 'L', 'M', 'X', 'J', 'V', 'S'];
-const DIAS_ORDEN_CONFIG = [
-  { key: 'L', label: 'Lunes' },
-  { key: 'M', label: 'Martes' },
-  { key: 'X', label: 'Miércoles' },
-  { key: 'J', label: 'Jueves' },
-  { key: 'V', label: 'Viernes' },
-  { key: 'S', label: 'Sábado' },
-  { key: 'D', label: 'Domingo' },
-];
 
 function getZoneForFtpPct(pct: number) {
   if (pct <= 55) return COGGAN_ZONES[0];
@@ -133,9 +120,6 @@ function obtenerRangoPotencia(pct: number, ftp: number) {
   };
 }
 
-// ============================================================================
-// 2. MOTOR TRADUCTOR DE SESIONES DE LA BD A BLOQUES FISIOLÓGICOS
-// ============================================================================
 interface BloqueEntreno {
   type: 'steady' | 'interval';
   label: string;
@@ -210,51 +194,9 @@ function construirEstructuraSesion(nombreSesion: string, duracionTotal: number, 
   const enfMin = Math.max(5, Math.round(dur * 0.12));
   const cuerpoMin = Math.max(15, dur - calMin - enfMin);
 
-  if (texto.includes('vo2') || texto.includes('hiit') || texto.includes('rønnestad') || texto.includes('series')) {
-    const reps = Math.max(3, Math.min(6, Math.floor(cuerpoMin / 8)));
-    return {
-      isRest: false,
-      coachNote: 'Evita salir al 130% en el primer minuto. Busca un ritmo constante en zona Z5 con cadencia alta (95-100 rpm) para no saturar las piernas.',
-      blocks: [
-        { type: 'steady', label: 'Calentamiento Progresivo Z2', durationMin: calMin, ftpPct: 65, cadence: '90 rpm' },
-        { type: 'interval', label: 'Potencia Aeróbica VO2Max', reps, workMin: 4, workPct: 112, workCadence: '95-100 rpm', restMin: 4, restPct: 52 },
-        { type: 'steady', label: 'Enfriamiento Regenerativo Z1', durationMin: enfMin, ftpPct: 50, cadence: '85 rpm' },
-      ] as BloqueEntreno[],
-    };
-  }
-
-  if (texto.includes('umbral') || texto.includes('threshold') || texto.includes('ftp') || texto.includes('over')) {
-    const reps = Math.max(2, Math.min(4, Math.floor(cuerpoMin / 14)));
-    const workMin = Math.max(8, Math.round((cuerpoMin / reps) * 0.72));
-    return {
-      isRest: false,
-      coachNote: 'Posición estable acoplado o en escaladores. Controla la respiración diafragmática y mantén una entrega de vatios constante en Z4.',
-      blocks: [
-        { type: 'steady', label: 'Calentamiento Aeróbico Z2', durationMin: calMin, ftpPct: 66, cadence: '90 rpm' },
-        { type: 'interval', label: 'Cruceros en Umbral Funcional (FTP)', reps, workMin, workPct: 98, workCadence: '90-94 rpm', restMin: 4, restPct: 55 },
-        { type: 'steady', label: 'Vuelta a la Calma Z1', durationMin: enfMin, ftpPct: 50, cadence: '85 rpm' },
-      ] as BloqueEntreno[],
-    };
-  }
-
-  if (texto.includes('sweet') || texto.includes('ss') || texto.includes('tempo') || texto.includes('fuerza') || texto.includes('torque')) {
-    const reps = Math.max(2, Math.min(4, Math.floor(cuerpoMin / 14)));
-    const workMin = Math.max(8, Math.round((cuerpoMin / reps) * 0.75));
-    const cad = texto.includes('fuerza') || texto.includes('torque') ? '65-72 rpm' : '86-92 rpm';
-    return {
-      isRest: false,
-      coachNote: 'Máxima relación estímulo fisiológico / fatiga. Mantén el core estable sin balancear los hombros y aplica par de fuerza redondo.',
-      blocks: [
-        { type: 'steady', label: 'Calentamiento Progresivo', durationMin: calMin, ftpPct: 62, cadence: '90 rpm' },
-        { type: 'interval', label: 'Bloques Sweet Spot Sostenido', reps, workMin, workPct: 90, workCadence: cad, restMin: 4, restPct: 55 },
-        { type: 'steady', label: 'Enfriamiento Suave Z1', durationMin: enfMin, ftpPct: 50, cadence: '85 rpm' },
-      ] as BloqueEntreno[],
-    };
-  }
-
   return {
     isRest: false,
-    coachNote: 'Mantén una entrega de vatios constante entre el 65% y 72% del FTP sin picos en Z4. Vigila que el pulso no derive más de un 5%.',
+    coachNote: 'Mantén una entrega de vatios constante entre el 65% y 72% del FTP sin picos en Z4.',
     blocks: [
       { type: 'steady', label: 'Calentamiento Progresivo', durationMin: calMin, ftpPct: 58, cadence: '88 rpm' },
       { type: 'steady', label: 'Bloque Aeróbico Continuo FatMax Z2', durationMin: cuerpoMin, ftpPct: 68, cadence: '88-92 rpm' },
@@ -397,13 +339,8 @@ function formatDurationHm(totalMinutes: number) {
   return `${h}h ${m < 10 ? '0' + m : m}m`;
 }
 
-// ============================================================================
-// 3. COMPONENTE PRINCIPAL: CALENDARIO, HISTORIAL Y READINESS VELOCOACH PRO
-// ============================================================================
 export default function CalendarioScreen() {
   const [sesiones, setSesiones] = useState<any[]>([]);
-  const [actividadesRealizadas, setActividadesRealizadas] = useState<any[]>([]);
-  const [vistaAgenda, setVistaAgenda] = useState<'plan' | 'realizadas'>('plan');
   const [sincronizando, setSincronizando] = useState(false);
 
   const [telemetria, setTelemetria] = useState<any>({
@@ -417,56 +354,15 @@ export default function CalendarioScreen() {
       veredicto: 'TRAIN HARD',
       color: '#10b981',
       acwr: 1.0,
-      consejo: 'Estado óptimo para asimilar carga de entrenamiento.',
+      consejo: 'Estado óptimo para entrenar.',
     },
   });
   const [cargando, setCargando] = useState(true);
 
-  // Modales
   const [selector, setSelector] = useState({ visible: false, id: 0, nombre: '' });
   const [zonesModalVisible, setZonesModalVisible] = useState(false);
-  const [planModalVisible, setPlanModalVisible] = useState(false);
-  const [dispModalVisible, setDispModalVisible] = useState(false);
-  const [objModalVisible, setObjModalVisible] = useState(false);
-
-  const [horasDia, setHorasDia] = useState<Record<string, number>>({
-    L: 2,
-    M: 2,
-    X: 2,
-    J: 2,
-    V: 0,
-    S: 5,
-    D: 6,
-  });
-
-  const [nuevoObj, setNuevoObj] = useState({
-    nombre: '',
-    fecha_meta: '2027-06-20',
-    prioridad: 'B',
-    tipo_evento: 'Gran Fondo',
-  });
-
-  const [macrociclo, setMacrociclo] = useState<any>({
-    objetivo: 'Sin objetivo definido',
-    fecha_meta: null,
-    disponibilidad: null,
-    objetivos_temporada: [],
-    total_fases: 0,
-    resumen_estrategico: null,
-    fase_activa: null,
-    fases: [],
-  });
-
   const [detalleId, setDetalleId] = useState<number | null>(null);
   const [analiticaAbierta, setAnaliticaAbierta] = useState(false);
-
-  const formatearRangoFechas = (inicioStr: string, finStr: string) => {
-    const meses = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
-    const d1 = new Date(`${inicioStr}T00:00:00`);
-    const d2 = new Date(`${finStr}T00:00:00`);
-    if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return `${inicioStr} – ${finStr}`;
-    return `${d1.getDate()} ${meses[d1.getMonth()]} – ${d2.getDate()} ${meses[d2.getMonth()]}`;
-  };
 
   const cargarCalendario = useCallback(async () => {
     try {
@@ -475,24 +371,15 @@ export default function CalendarioScreen() {
       const respuesta = await fetch(url, {
         headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache', Expires: '0' },
       });
-      if (!respuesta.ok) {
-        console.warn('Servidor actualizándose en Render, estado:', respuesta.status);
-        return;
-      }
+      if (!respuesta.ok) return;
       const data = await respuesta.json();
 
       if (Array.isArray(data)) {
         setSesiones(data);
       } else if (data && Array.isArray(data.sesiones)) {
         setSesiones(data.sesiones);
-        if (Array.isArray(data.actividades_realizadas)) {
-          setActividadesRealizadas(data.actividades_realizadas);
-        }
         if (data.telemetria) {
           setTelemetria((prev: any) => ({ ...prev, ...data.telemetria }));
-        }
-        if (data.macrociclo) {
-          setMacrociclo(data.macrociclo);
         }
       }
     } catch (error) {
@@ -508,7 +395,7 @@ export default function CalendarioScreen() {
       await fetch(`${API_BASE}/sync`, { method: 'POST' });
       await cargarCalendario();
     } catch (e) {
-      console.error('Error sincronizando con Intervals:', e);
+      console.error('Error sincronizando:', e);
     } finally {
       setSincronizando(false);
     }
@@ -547,62 +434,12 @@ export default function CalendarioScreen() {
       });
       if (res.ok) {
         await cargarCalendario();
-        Alert.alert('Sesión Adaptada ⚡', `Tu entrenamiento de hoy se ha recalculado a ${minutos} min (${sensacion}).`);
-      } else {
-        Alert.alert('Aviso', 'No se pudo adaptar la sesión en el servidor.');
+        Alert.alert('Sesión de Hoy Adaptada ⚡', `Recalculada a ${minutos} min (${sensacion}).`);
       }
     } catch {
-      Alert.alert('Error', 'Fallo de conexión al enviar el check-in.');
+      Alert.alert('Error', 'Fallo al enviar el check-in.');
     } finally {
       setCargando(false);
-    }
-  };
-
-  const guardarDisponibilidadBD = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/disponibilidad`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ horas_por_dia: horasDia }),
-      });
-      if (res.ok) {
-        setDispModalVisible(false);
-        await cargarCalendario();
-        Alert.alert('Disponibilidad Guardada 🕒', 'El Coach IA respetará estos topes diarios en cada planificación.');
-      }
-    } catch {
-      Alert.alert('Error', 'No se pudo guardar la disponibilidad.');
-    }
-  };
-
-  const guardarNuevoObjetivoBD = async () => {
-    if (!nuevoObj.nombre.trim()) {
-      Alert.alert('Falta el nombre', 'Escribe el nombre de la prueba o reto.');
-      return;
-    }
-    try {
-      const res = await fetch(`${API_BASE}/api/objetivos`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(nuevoObj),
-      });
-      if (res.ok) {
-        setObjModalVisible(false);
-        setNuevoObj({ nombre: '', fecha_meta: '2027-06-20', prioridad: 'B', tipo_evento: 'Gran Fondo' });
-        await cargarCalendario();
-        Alert.alert('Objetivo Añadido 🎯', 'Ya forma parte de tu calendario de temporada.');
-      }
-    } catch {
-      Alert.alert('Error', 'No se pudo guardar el objetivo.');
-    }
-  };
-
-  const eliminarObjetivoTemporada = async (id: number) => {
-    try {
-      await fetch(`${API_BASE}/api/objetivos/${id}`, { method: 'DELETE' });
-      await cargarCalendario();
-    } catch (e) {
-      console.error(e);
     }
   };
 
@@ -717,8 +554,6 @@ export default function CalendarioScreen() {
   }, [sesiones, telemetria.ftp]);
 
   const wkg = (telemetria.ftp / (telemetria.peso || 71)).toFixed(2);
-  const ssMin = Math.round(telemetria.ftp * 0.88);
-  const ssMax = Math.round(telemetria.ftp * 0.94);
   const rt = telemetria.rest_or_train || {
     score: 78,
     veredicto: 'TRAIN HARD',
@@ -763,14 +598,13 @@ export default function CalendarioScreen() {
         </View>
 
         <ScrollView style={{ marginTop: 14 }} showsVerticalScrollIndicator={false}>
-          {/* Si hay una actividad real subida ese día en Intervals.icu, mostrar comparativa */}
           {item.actividad_real && (
             <View style={styles.realActivityBanner}>
               <Text style={styles.realActivityTitle}>
-                ✅ SALIDA REAL REGISTRADA EN INTERVALS.ICU: {item.actividad_real.nombre}
+                ✅ SALIDA REAL REGISTRADA: {item.actividad_real.nombre}
               </Text>
               <Text style={styles.realActivitySub}>
-                ⏱️ {formatDurationHm(item.actividad_real.duracion_min)} • 📍 {item.actividad_real.distancia_km} km • ⛰️ +{item.actividad_real.desnivel_m} m • ⚡ NP {item.actividad_real.np}W • 🔥 {item.actividad_real.tss} TSS (Planeado: {m.tss} TSS)
+                ⏱️ {formatDurationHm(item.actividad_real.duracion_min)} • 📍 {item.actividad_real.distancia_km} km • ⛰️ +{item.actividad_real.desnivel_m} m • ⚡ NP {item.actividad_real.np}W • 🔥 {item.actividad_real.tss} TSS
               </Text>
             </View>
           )}
@@ -785,11 +619,6 @@ export default function CalendarioScreen() {
               <Text style={[styles.sectionMiniTitle, { marginTop: 18, marginBottom: 8 }]}>
                 ESTRUCTURA DE LA SESIÓN
               </Text>
-              {!bloquesDesdeEstructura(item.estructura) && (
-                <Text style={[styles.origenEstructuraText, { color: '#fbbf24', marginTop: 0, marginBottom: 8 }]}>
-                  ≈ Estimada a partir del nombre de la sesión. Pide al coach que reestructure la semana para fijar los bloques reales.
-                </Text>
-              )}
 
               <View style={{ gap: 6 }}>
                 {m.blocks.map((b: BloqueEntreno, bIdx: number) => {
@@ -865,53 +694,29 @@ export default function CalendarioScreen() {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#10b981" />
-        <Text style={styles.loadingText}>Sincronizando telemetría, actividades y microciclo...</Text>
+        <Text style={styles.loadingText}>Sincronizando agenda semanal...</Text>
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
-      {/* ==================== TOP TELEMETRY NAVBAR ==================== */}
+      {/* ==================== CABECERA COMPACTA Y LIMPIA ==================== */}
       <View style={styles.navbar}>
         <View style={styles.brandRow}>
           <View style={styles.brandIcon}>
             <Text style={{ fontSize: 18 }}>🚴‍♂️</Text>
           </View>
           <View style={{ flex: 1 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              <Text style={styles.brandTitle}>
-                VELO<Text style={{ color: '#34d399' }}>COACH</Text>
-              </Text>
-              <View style={styles.proWattBadge}>
-                <Text style={styles.proWattBadgeText}>PRO WATT LAB</Text>
-              </View>
-            </View>
+            <Text style={styles.brandTitle}>
+              AGENDA <Text style={{ color: '#34d399' }}>SEMANAL</Text>
+            </Text>
             <Text style={styles.brandSubtitle} numberOfLines={1}>
-              🎯 {telemetria.objetivo} {macrociclo.disponibilidad ? `• ${macrociclo.disponibilidad}` : ''}
+              🎯 {telemetria.objetivo} • {telemetria.ftp}W ({wkg} W/kg)
             </Text>
           </View>
-        </View>
-
-        <View style={styles.telemetryPillsBar}>
-          <View style={styles.pillItem}>
-            <Text style={styles.pillLabel}>FTP:</Text>
-            <Text style={[styles.pillValue, { color: '#fbbf24' }]}>{telemetria.ftp}W</Text>
-          </View>
-          <View style={styles.pillDivider} />
-          <View style={styles.pillItem}>
-            <Text style={styles.pillLabel}>Ratio:</Text>
-            <Text style={[styles.pillValue, { color: '#34d399' }]}>{wkg} W/kg</Text>
-          </View>
-          <View style={styles.pillDivider} />
-          <TouchableOpacity style={styles.zonesBtn} onPress={() => setDispModalVisible(true)}>
-            <Text style={styles.zonesBtnText}>🕒 Disp. L-D</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.zonesBtn} onPress={() => setObjModalVisible(true)}>
-            <Text style={styles.zonesBtnText}>🎯 +Reto</Text>
-          </TouchableOpacity>
           <TouchableOpacity style={styles.zonesBtn} onPress={() => setZonesModalVisible(true)}>
-            <Text style={styles.zonesBtnText}>⚡ Z1-Z7</Text>
+            <Text style={styles.zonesBtnText}>⚡ Zonas Z1-Z7</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -921,12 +726,14 @@ export default function CalendarioScreen() {
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={sincronizando} onRefresh={sincronizarTodoConIntervals} tintColor="#10b981" />}
       >
-        {/* ==================== WIDGET SEMÁFORO: REST OR TRAIN (ESTILO WHOOP / ATHLETICA) ==================== */}
+        {/* ==================== TARJETA INTEGRADA: READINESS + CHECK-IN RÁPIDO (SIN CORTES) ==================== */}
         <View style={[styles.restOrTrainCard, { borderColor: rt.color }]}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View style={styles.rtTopRow}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
               <View style={[styles.rtIndicatorDot, { backgroundColor: rt.color }]} />
-              <Text style={styles.rtOverline}>READINESS DIARIO • REST OR TRAIN</Text>
+              <Text style={styles.rtOverline} numberOfLines={1}>
+                REST OR TRAIN • READINESS HOY
+              </Text>
             </View>
             <View style={[styles.rtVerdictBadge, { backgroundColor: `${rt.color}22`, borderColor: rt.color }]}>
               <Text style={[styles.rtVerdictText, { color: rt.color }]}>
@@ -934,105 +741,34 @@ export default function CalendarioScreen() {
               </Text>
             </View>
           </View>
+
           <Text style={styles.rtAdviceText}>{rt.consejo}</Text>
+
+          <View style={styles.checkinBar}>
+            <TouchableOpacity
+              style={[styles.checkinBtn, { backgroundColor: 'rgba(16,185,129,0.12)', borderColor: '#10b981' }]}
+              onPress={() => adaptarHoyCheckin('frescas', 90, 'Indoor')}
+            >
+              <Text style={[styles.checkinBtnText, { color: '#34d399' }]}>⚡ 1.5h Fresco</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.checkinBtn, { backgroundColor: 'rgba(14,165,233,0.12)', borderColor: '#0ea5e9' }]}
+              onPress={() => adaptarHoyCheckin('normales', 60, 'Indoor')}
+            >
+              <Text style={[styles.checkinBtnText, { color: '#38bdf8' }]}>⏱️ Tengo 1h Hoy</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.checkinBtn, { backgroundColor: 'rgba(244,63,94,0.12)', borderColor: '#f43f5e' }]}
+              onPress={() => adaptarHoyCheckin('cargadas', 50, 'Indoor')}
+            >
+              <Text style={[styles.checkinBtnText, { color: '#fb7185' }]}>🦵 Fatiga (Z1)</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
-        {/* ==================== BANNER DE FASE ACTIVA DEL MACROCICLO ==================== */}
-        <TouchableOpacity
-          style={styles.macroBanner}
-          activeOpacity={0.85}
-          onPress={() => setPlanModalVisible(true)}
-        >
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
-              <View style={styles.phaseRingActive}>
-                <View style={styles.phaseRingInnerDot} />
-              </View>
-              <Text style={[styles.macroBannerOverline, { flex: 1 }]}>
-                {macrociclo.fase_activa
-                  ? `BLOQUE ACTIVO • ${formatearRangoFechas(macrociclo.fase_activa.fecha_inicio, macrociclo.fase_activa.fecha_fin).toUpperCase()}`
-                  : 'PLANIFICACIÓN POR BLOQUES'}
-              </Text>
-            </View>
-
-            <View style={styles.verPlanPill}>
-              <Text style={styles.verPlanPillText}>
-                🗺️ Ver Plan ({macrociclo.total_fases || 0})
-              </Text>
-            </View>
-          </View>
-
-          <View style={{ marginTop: 10 }}>
-            <Text style={styles.macroBannerTitle}>
-              {macrociclo.fase_activa
-                ? macrociclo.fase_activa.nombre
-                : `${macrociclo.objetivo}${macrociclo.fecha_meta ? ` (${macrociclo.fecha_meta})` : ''}`}
-            </Text>
-
-            {macrociclo.fase_activa ? (
-              <>
-                <Text style={[styles.macroBannerDesc, { marginTop: 4 }]}>
-                  {macrociclo.fase_activa.descripcion}
-                </Text>
-                <Text style={styles.quedanDiasText}>
-                  Quedan {macrociclo.fase_activa.dias_restantes} días en este bloque
-                </Text>
-              </>
-            ) : (
-              <Text style={[styles.macroBannerDesc, { marginTop: 4 }]}>
-                Pídele al Coach IA en el chat que estructure los bloques de entrenamiento para tu objetivo.
-              </Text>
-            )}
-
-            {/* Píldoras de Múltiples Objetivos de la Temporada (A, B, C) */}
-            {Array.isArray(macrociclo.objetivos_temporada) && macrociclo.objetivos_temporada.length > 0 && (
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-                {macrociclo.objetivos_temporada.map((ob: any) => (
-                  <TouchableOpacity
-                    key={ob.id}
-                    onLongPress={() =>
-                      Alert.alert('Eliminar Objetivo', `¿Quitar '${ob.nombre}' de la temporada?`, [
-                        { text: 'Cancelar', style: 'cancel' },
-                        { text: 'Eliminar', style: 'destructive', onPress: () => eliminarObjetivoTemporada(ob.id) },
-                      ])
-                    }
-                    style={styles.objSeasonPill}
-                  >
-                    <Text style={styles.objSeasonPillText}>
-                      [{ob.prioridad}] {ob.nombre} ({ob.fecha_meta})
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            )}
-          </View>
-        </TouchableOpacity>
-
-        {/* ==================== ACCIONES RÁPIDAS: CHECK-IN DIARIO (ESTILO JOIN) ==================== */}
-        <View style={styles.checkinBar}>
-          <TouchableOpacity
-            style={[styles.checkinBtn, { backgroundColor: 'rgba(16,185,129,0.12)', borderColor: '#10b981' }]}
-            onPress={() => adaptarHoyCheckin('frescas', 90, 'Indoor')}
-          >
-            <Text style={[styles.checkinBtnText, { color: '#34d399' }]}>⚡ 1.5h Fresco</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.checkinBtn, { backgroundColor: 'rgba(14,165,233,0.12)', borderColor: '#0ea5e9' }]}
-            onPress={() => adaptarHoyCheckin('normales', 60, 'Indoor')}
-          >
-            <Text style={[styles.checkinBtnText, { color: '#38bdf8' }]}>⏱️ Tengo 1h Hoy</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.checkinBtn, { backgroundColor: 'rgba(244,63,94,0.12)', borderColor: '#f43f5e' }]}
-            onPress={() => adaptarHoyCheckin('cargadas', 50, 'Indoor')}
-          >
-            <Text style={[styles.checkinBtnText, { color: '#fb7185' }]}>🦵 Fatiga (Z1)</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* ==================== 1. DASHBOARD DE CARGA FISIOLÓGICA ==================== */}
+        {/* ==================== RESUMEN COMPACTO DEL MICROCICLO (DESPLEGABLE) ==================== */}
         <View style={styles.dashboardPanel}>
           <TouchableOpacity
             style={[
@@ -1044,624 +780,294 @@ export default function CalendarioScreen() {
           >
             <View style={{ flex: 1 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <Text style={styles.panelTitle}>Analítica del Microciclo</Text>
+                <Text style={styles.panelTitle}>Carga de la Semana</Text>
                 <View style={styles.modelBadge}>
                   <Text style={styles.modelBadgeText}>{resumenMicrociclo.modeloDist}</Text>
                 </View>
               </View>
               <Text style={styles.panelSubtitle}>
-                {analiticaAbierta
-                  ? `Vatios exactos calculados sobre tu FTP actual (${telemetria.ftp}W • SS: ${ssMin}-${ssMax}W)`
-                  : `TSS ${resumenMicrociclo.totalCompletedTss}/${resumenMicrociclo.totalPlannedTss} • ${formatDurationHm(resumenMicrociclo.totalPlannedMin)} • IF ${resumenMicrociclo.avgIf}`}
+                TSS {resumenMicrociclo.totalCompletedTss}/{resumenMicrociclo.totalPlannedTss} • {formatDurationHm(resumenMicrociclo.totalPlannedMin)} • IF {resumenMicrociclo.avgIf}
               </Text>
             </View>
-            <View style={{ alignItems: 'flex-end', gap: 6 }}>
+            <View style={{ alignItems: 'flex-end', gap: 4 }}>
               <View style={styles.complianceBadge}>
                 <Text style={styles.complianceBadgeText}>
                   {resumenMicrociclo.compliancePct}% ({resumenMicrociclo.completedSessionsCount}/{resumenMicrociclo.activeSessionsCount})
                 </Text>
               </View>
-              <Text style={styles.analiticaToggleText}>{analiticaAbierta ? 'Ocultar ▴' : 'Ver detalle ▾'}</Text>
+              <Text style={styles.analiticaToggleText}>{analiticaAbierta ? 'Ocultar ▴' : 'Detalles ▾'}</Text>
             </View>
           </TouchableOpacity>
 
           {!analiticaAbierta && (
-            <View style={[styles.progressTrack, { marginTop: 10 }]}>
+            <View style={[styles.progressTrack, { marginTop: 8 }]}>
               <View style={[styles.progressFill, { width: `${resumenMicrociclo.compliancePct}%` }]} />
             </View>
           )}
 
           {analiticaAbierta && (
-            <>
-              <View style={styles.kpiGrid}>
-                <View style={styles.kpiCard}>
-                  <Text style={styles.kpiLabel}>🔥 TSS SEMANAL</Text>
-                  <View style={styles.kpiValRow}>
-                    <Text style={styles.kpiMainVal}>{resumenMicrociclo.totalPlannedTss}</Text>
-                    <Text style={styles.kpiUnit}>TSS</Text>
-                  </View>
-                  <Text style={[styles.kpiSub, { color: '#34d399' }]}>
-                    Hecho: {resumenMicrociclo.totalCompletedTss} TSS
-                  </Text>
-                </View>
-
-                <View style={styles.kpiCard}>
-                  <Text style={styles.kpiLabel}>⏱️ VOLUMEN TOTAL</Text>
-                  <View style={styles.kpiValRow}>
-                    <Text style={styles.kpiMainVal}>
-                      {formatDurationHm(resumenMicrociclo.totalPlannedMin)}
-                    </Text>
-                  </View>
-                  <Text style={[styles.kpiSub, { color: '#38bdf8' }]}>
-                    Hecho: {formatDurationHm(resumenMicrociclo.totalCompletedMin)}
-                  </Text>
-                </View>
-
-                <View style={styles.kpiCard}>
-                  <Text style={styles.kpiLabel}>⚡ IF MEDIO / NP</Text>
-                  <View style={styles.kpiValRow}>
-                    <Text style={[styles.kpiMainVal, { color: '#34d399' }]}>
-                      {resumenMicrociclo.avgIf}
-                    </Text>
-                    <Text style={styles.kpiUnit}>IF</Text>
-                  </View>
-                  <Text style={styles.kpiSub}>NP Media: {resumenMicrociclo.avgNp}W</Text>
-                </View>
-
-                <View style={styles.kpiCard}>
-                  <Text style={styles.kpiLabel}>🔋 TRABAJO MEC.</Text>
-                  <View style={styles.kpiValRow}>
-                    <Text style={styles.kpiMainVal}>{resumenMicrociclo.totalKj}</Text>
-                    <Text style={styles.kpiUnit}>kJ</Text>
-                  </View>
-                  <Text style={styles.kpiSub}>≈ {resumenMicrociclo.totalKj} kcal</Text>
-                </View>
-
-                <View style={[styles.kpiCard, styles.kpiCardFullWidth]}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.kpiLabel, { color: '#fbbf24' }]}>🍼 NUTRICIÓN EN RUTA (CHO)</Text>
-                      <Text style={styles.kpiSub} numberOfLines={1}>
-                        Total estimado: {resumenMicrociclo.totalChoGrams}g Carbohidratos
-                      </Text>
-                    </View>
-                    <Text style={[styles.kpiMainVal, { color: '#fbbf24', fontSize: 16, flexShrink: 0 }]}>
-                      60-90 g/h
-                    </Text>
-                  </View>
-                </View>
+            <View style={styles.kpiGrid}>
+              <View style={styles.kpiCard}>
+                <Text style={styles.kpiLabel}>🔥 TSS SEMANAL</Text>
+                <Text style={styles.kpiMainVal}>{resumenMicrociclo.totalPlannedTss} TSS</Text>
+                <Text style={[styles.kpiSub, { color: '#34d399' }]}>
+                  Hecho: {resumenMicrociclo.totalCompletedTss} TSS
+                </Text>
               </View>
-
-              <View style={styles.zonesDistributionSection}>
-                <View style={{ marginBottom: 8 }}>
-                  <Text style={styles.sectionMiniTitle}>DISTRIBUCIÓN EN ZONAS DE POTENCIA</Text>
-                  <Text style={styles.zoneSplitText}>
-                    Z1-Z2: {resumenMicrociclo.lowPct}% • Z3-Z4: {resumenMicrociclo.midPct}% • Z5+: {resumenMicrociclo.highPct}%
-                  </Text>
-                </View>
-
-                <View style={styles.stackedBarContainer}>
-                  {COGGAN_ZONES.map((z) => {
-                    const mins = resumenMicrociclo.weeklyZonesMin[z.id] || 0;
-                    if (mins <= 0) return null;
-                    return (
-                      <View
-                        key={z.id}
-                        style={{
-                          flex: mins,
-                          backgroundColor: z.color,
-                          height: '100%',
-                        }}
-                      />
-                    );
-                  })}
-                </View>
-
-                <View style={styles.zonesLegendGrid}>
-                  {COGGAN_ZONES.map((z) => {
-                    const mins = Math.round(resumenMicrociclo.weeklyZonesMin[z.id] || 0);
-                    const pct =
-                      resumenMicrociclo.totalPlannedMin > 0
-                        ? Math.round((mins / resumenMicrociclo.totalPlannedMin) * 100)
-                        : 0;
-                    return (
-                      <View key={z.id} style={styles.zoneLegendPill}>
-                        <Text style={[styles.zonePillId, { color: z.color }]}>{z.id}</Text>
-                        <Text style={styles.zonePillPct}>{pct}%</Text>
-                        <Text style={styles.zonePillMins}>{mins}m</Text>
-                      </View>
-                    );
-                  })}
-                </View>
+              <View style={styles.kpiCard}>
+                <Text style={styles.kpiLabel}>⏱️ VOLUMEN TOTAL</Text>
+                <Text style={styles.kpiMainVal}>{formatDurationHm(resumenMicrociclo.totalPlannedMin)}</Text>
+                <Text style={[styles.kpiSub, { color: '#38bdf8' }]}>
+                  Hecho: {formatDurationHm(resumenMicrociclo.totalCompletedMin)}
+                </Text>
               </View>
-            </>
+              <View style={styles.kpiCard}>
+                <Text style={styles.kpiLabel}>🔋 TRABAJO MEC.</Text>
+                <Text style={styles.kpiMainVal}>{resumenMicrociclo.totalKj} kJ</Text>
+                <Text style={styles.kpiSub}>NP Media: {resumenMicrociclo.avgNp}W</Text>
+              </View>
+              <View style={styles.kpiCard}>
+                <Text style={[styles.kpiLabel, { color: '#fbbf24' }]}>🍼 NUTRICIÓN CHO</Text>
+                <Text style={[styles.kpiMainVal, { color: '#fbbf24' }]}>{resumenMicrociclo.totalChoGrams} g</Text>
+                <Text style={styles.kpiSub}>60-90 g/h en ruta</Text>
+              </View>
+            </View>
           )}
         </View>
 
-        {/* ==================== CONMUTADOR: PLAN SEMANAL vs ACTIVIDADES REALIZADAS ==================== */}
-        <View style={styles.segmentedSwitch}>
-          <TouchableOpacity
-            style={[styles.segmentBtn, vistaAgenda === 'plan' && styles.segmentBtnActive]}
-            onPress={() => setVistaAgenda('plan')}
-          >
-            <Text style={[styles.segmentBtnText, vistaAgenda === 'plan' && styles.segmentBtnTextActive]}>
-              🗓️ Plan Semanal ({resumenMicrociclo.sesionesEnriquecidas.length})
+        {/* ==================== LISTA DE ENTRENAMIENTOS SEMANALES ==================== */}
+        {resumenMicrociclo.sesionesEnriquecidas.length === 0 ? (
+          <View style={styles.emptyBox}>
+            <Text style={styles.emptyTitle}>Sin sesiones activas esta semana</Text>
+            <Text style={styles.emptyText}>
+              Abre la pestaña Coach y pídele que planifique tu semana según tu bloque activo.
             </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.segmentBtn, vistaAgenda === 'realizadas' && styles.segmentBtnActive]}
-            onPress={() => setVistaAgenda('realizadas')}
-          >
-            <Text style={[styles.segmentBtnText, vistaAgenda === 'realizadas' && styles.segmentBtnTextActive]}>
-              ✅ Realizadas ICU ({actividadesRealizadas.length})
-            </Text>
-          </TouchableOpacity>
-        </View>
+          </View>
+        ) : (
+          resumenMicrociclo.sesionesEnriquecidas.map((item, idx) => {
+            const m = item.metrics;
+            const fechaObj = new Date(`${item.fecha}T00:00:00`);
+            const diaIdx = !isNaN(fechaObj.getTime()) ? fechaObj.getDay() : idx % 7;
+            const nombreDia = DIAS_SEMANA[diaIdx];
+            const letraDia = DIAS_CORTO[diaIdx];
+            const isIndoor = (item.entorno || '').toLowerCase().includes('indoor');
 
-        {/* ==================== VISTA A: TARJETAS DE ENTRENAMIENTO SEMANAL (PLANEADO + CONCILIACIÓN REAL) ==================== */}
-        {vistaAgenda === 'plan' ? (
-          resumenMicrociclo.sesionesEnriquecidas.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyTitle}>Sin sesiones activas en la agenda</Text>
-              <Text style={styles.emptyText}>
-                Abre la pestaña del Coach IA y pídele que planifique tu semana según tu bloque activo.
-              </Text>
-            </View>
-          ) : (
-            resumenMicrociclo.sesionesEnriquecidas.map((item, idx) => {
-              const m = item.metrics;
-              const fechaObj = new Date(`${item.fecha}T00:00:00`);
-              const diaIdx = !isNaN(fechaObj.getTime()) ? fechaObj.getDay() : idx % 7;
-              const nombreDia = DIAS_SEMANA[diaIdx];
-              const letraDia = DIAS_CORTO[diaIdx];
-              const isIndoor = (item.entorno || '').toLowerCase().includes('indoor');
+            const maxPctBar = Math.max(130, ...m.segments.map((s: any) => s.ftpPct || 70));
+            const ftpLineBottomPct = Math.min(92, Math.round((100 / maxPctBar) * 100));
 
-              const maxPctBar = Math.max(130, ...m.segments.map((s: any) => s.ftpPct || 70));
-              const ftpLineBottomPct = Math.min(92, Math.round((100 / maxPctBar) * 100));
-
-              return (
-                <TouchableOpacity
-                  key={item.id.toString()}
-                  activeOpacity={0.85}
-                  onPress={() => setDetalleId(item.id)}
-                  style={[
-                    styles.workoutCard,
-                    item.isCompleted && styles.workoutCardCompleted,
-                  ]}
-                >
-                  <View style={styles.cardTopBar}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-                      <View
+            return (
+              <TouchableOpacity
+                key={item.id.toString()}
+                activeOpacity={0.85}
+                onPress={() => setDetalleId(item.id)}
+                style={[
+                  styles.workoutCard,
+                  item.isCompleted && styles.workoutCardCompleted,
+                ]}
+              >
+                <View style={styles.cardTopBar}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                    <View
+                      style={[
+                        styles.dayAvatar,
+                        item.isCompleted
+                          ? styles.dayAvatarCompleted
+                          : m.isRest
+                            ? styles.dayAvatarRest
+                            : styles.dayAvatarActive,
+                      ]}
+                    >
+                      <Text
                         style={[
-                          styles.dayAvatar,
-                          item.isCompleted
-                            ? styles.dayAvatarCompleted
-                            : m.isRest
-                              ? styles.dayAvatarRest
-                              : styles.dayAvatarActive,
+                          styles.dayAvatarShort,
+                          item.isCompleted && { color: '#020617' },
                         ]}
                       >
-                        <Text
-                          style={[
-                            styles.dayAvatarShort,
-                            item.isCompleted && { color: '#020617' },
-                          ]}
-                        >
-                          {letraDia}
-                        </Text>
-                        <Text
-                          style={[
-                            styles.dayAvatarNum,
-                            item.isCompleted && { color: '#020617' },
-                          ]}
-                        >
-                          D{idx + 1}
-                        </Text>
-                      </View>
-
-                      <View style={{ flex: 1 }}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                          <Text style={styles.dayNameText}>
-                            {nombreDia} • {item.fecha}
-                          </Text>
-                          <View
-                            style={[
-                              styles.envBadge,
-                              m.isRest
-                                ? styles.envRest
-                                : isIndoor
-                                  ? styles.envIndoor
-                                  : styles.envOutdoor,
-                            ]}
-                          >
-                            <Text
-                              style={[
-                                styles.envBadgeText,
-                                m.isRest
-                                  ? { color: '#94a3b8' }
-                                  : isIndoor
-                                    ? { color: '#fcd34d' }
-                                    : { color: '#7dd3fc' },
-                              ]}
-                            >
-                              {m.isRest ? '🛌 Descanso' : isIndoor ? '⚡ Rodillo Indoor' : '🛣️ Exterior'}
-                            </Text>
-                          </View>
-                        </View>
-                        <Text style={styles.workoutTitleText}>{item.sesion}</Text>
-                      </View>
-                    </View>
-
-                    {!m.isRest && (
-                      <TouchableOpacity
+                        {letraDia}
+                      </Text>
+                      <Text
                         style={[
-                          styles.doneBtn,
-                          item.isCompleted && styles.doneBtnActive,
+                          styles.dayAvatarNum,
+                          item.isCompleted && { color: '#020617' },
                         ]}
-                        onPress={() => toggleCompletado(item.id)}
                       >
-                        <Text
-                          style={[
-                            styles.doneBtnText,
-                            item.isCompleted && { color: '#020617' },
-                          ]}
-                        >
-                          {item.isCompleted ? '✓ Hecho' : 'Marcar Hecho'}
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-
-                  {/* INSIGNIA DE CONCILIACIÓN REAL SI HAY ACTIVIDAD EN INTERVALS.ICU ESE DÍA */}
-                  {item.actividad_real && (
-                    <View style={styles.matchedActivityStrip}>
-                      <Text style={styles.matchedActivityText}>
-                        🚴‍♂️ Realizado: {item.actividad_real.nombre} • {item.actividad_real.distancia_km} km • +{item.actividad_real.desnivel_m}m • {item.actividad_real.np}W NP • {item.actividad_real.tss} TSS
+                        D{idx + 1}
                       </Text>
                     </View>
-                  )}
 
-                  {!m.isRest ? (
-                    <>
-                      <View style={styles.telemetryStrip}>
-                        <View style={styles.stripMetricsRow}>
-                          <Text style={styles.stripItem}>
-                            <Text style={styles.stripLabel}>Dur: </Text>
-                            <Text style={styles.stripValWhite}>{formatDurationHm(m.durationMin)}</Text>
-                          </Text>
-                          <Text style={styles.stripItem}>
-                            <Text style={styles.stripLabel}>TSS: </Text>
-                            <Text style={{ color: '#fbbf24', fontWeight: '800' }}>
-                              {item.tss_real ? `${item.tss_real}/${m.tss}` : m.tss}
-                            </Text>
-                          </Text>
-                          <Text style={styles.stripItem}>
-                            <Text style={styles.stripLabel}>IF: </Text>
-                            <Text style={{ color: '#34d399', fontWeight: '800' }}>{m.ifVal}</Text>
-                          </Text>
-                          <Text style={styles.stripItem}>
-                            <Text style={styles.stripLabel}>NP: </Text>
-                            <Text style={{ color: '#38bdf8', fontWeight: '800' }}>{m.np}W</Text>
-                          </Text>
-                        </View>
-                        <View style={styles.choBadge}>
-                          <Text style={styles.choBadgeText}>⚡ {m.choPerHour}</Text>
-                        </View>
-                      </View>
-
-                      <View style={styles.cardBody}>
-                        <View style={styles.powerChartBox}>
-                          <View
-                            style={[
-                              styles.ftpReferenceLine,
-                              { bottom: `${ftpLineBottomPct}%` },
-                            ]}
-                          >
-                            <Text style={styles.ftpReferenceLabel}>FTP {telemetria.ftp}W</Text>
-                          </View>
-                          <View style={styles.barsRow}>
-                            {m.segments.map((seg: any, sIdx: number) => {
-                              const heightPct = Math.max(
-                                12,
-                                Math.min(100, Math.round((seg.ftpPct / maxPctBar) * 100))
-                              );
-                              const z = getZoneForFtpPct(seg.ftpPct);
-                              return (
-                                <View
-                                  key={sIdx}
-                                  style={{
-                                    flex: Math.max(1, seg.durationMin),
-                                    height: `${heightPct}%`,
-                                    backgroundColor: z.color,
-                                    borderRadius: 3,
-                                    marginHorizontal: 1,
-                                  }}
-                                />
-                              );
-                            })}
-                          </View>
-                        </View>
-
-                        <Text
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <Text style={styles.dayNameText}>
+                          {nombreDia} • {item.fecha}
+                        </Text>
+                        <View
                           style={[
-                            styles.origenEstructuraText,
-                            { color: bloquesDesdeEstructura(item.estructura) ? '#34d399' : '#fbbf24' },
+                            styles.envBadge,
+                            m.isRest
+                              ? styles.envRest
+                              : isIndoor
+                                ? styles.envIndoor
+                                : styles.envOutdoor,
                           ]}
                         >
-                          {bloquesDesdeEstructura(item.estructura)
-                            ? '✔ Bloques diseñados por el coach'
-                            : '≈ Estimada por la app'}
-                        </Text>
-
-                        <View style={styles.tapHintRow}>
-                          <Text style={styles.tapHintText}>Ver desglose, vatios y exportar</Text>
-                          <Text style={styles.tapHintText}>›</Text>
-                        </View>
-                      </View>
-                    </>
-                  ) : (
-                    <View style={styles.restBody}>
-                      <Text style={styles.restSubText}>Día sin bici • Toca para ver la nota del entrenador</Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              );
-            })
-          )
-        ) : (
-          /* ==================== VISTA B: HISTORIAL DE ACTIVIDADES REALIZADAS (INTERVALS.ICU) ==================== */
-          <View>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <Text style={styles.sectionMainSubtitle}>
-                Últimas salidas reales sincronizadas desde Intervals.icu
-              </Text>
-              <TouchableOpacity style={styles.zonesBtn} onPress={sincronizarTodoConIntervals}>
-                <Text style={styles.zonesBtnText}>{sincronizando ? 'Sincronizando...' : '🔄 Actualizar ICU'}</Text>
-              </TouchableOpacity>
-            </View>
-
-            {actividadesRealizadas.length === 0 ? (
-              <View style={styles.emptyBox}>
-                <Text style={styles.emptyTitle}>Sin actividades sincronizadas</Text>
-                <Text style={styles.emptyText}>
-                  Pulsa el botón "Actualizar ICU" para descargar tus entrenamientos completados de Intervals.icu.
-                </Text>
-              </View>
-            ) : (
-              actividadesRealizadas.map((act) => {
-                const fechaObj = new Date(`${act.fecha}T00:00:00`);
-                const nombreDia = !isNaN(fechaObj.getTime()) ? DIAS_SEMANA[fechaObj.getDay()] : '';
-                const pctFtp = telemetria.ftp > 0 && act.np > 0 ? Math.round((act.np / telemetria.ftp) * 100) : 68;
-                const zAct = getZoneForFtpPct(pctFtp);
-
-                return (
-                  <View key={act.id} style={[styles.workoutCard, { borderColor: 'rgba(16,185,129,0.4)' }]}>
-                    <View style={styles.cardTopBar}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-                        <View style={[styles.dayAvatar, styles.dayAvatarCompleted]}>
-                          <Text style={[styles.dayAvatarShort, { color: '#020617' }]}>✓</Text>
-                          <Text style={[styles.dayAvatarNum, { color: '#020617' }]}>{act.tss}</Text>
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.dayNameText}>
-                            {nombreDia} • {act.fecha}
+                          <Text
+                            style={[
+                              styles.envBadgeText,
+                              m.isRest
+                                ? { color: '#94a3b8' }
+                                : isIndoor
+                                  ? { color: '#fcd34d' }
+                                  : { color: '#7dd3fc' },
+                            ]}
+                          >
+                            {m.isRest ? '🛌 Descanso' : isIndoor ? '⚡ Rodillo Indoor' : '🛣️ Exterior'}
                           </Text>
-                          <Text style={styles.workoutTitleText}>{act.nombre}</Text>
                         </View>
                       </View>
-                      <View style={[styles.stepZoneTag, { backgroundColor: zAct.bgBadge, borderColor: zAct.color }]}>
-                        <Text style={[styles.stepZoneTagText, { color: zAct.color }]}>
-                          {zAct.id} ({pctFtp}%)
-                        </Text>
-                      </View>
+                      <Text style={styles.workoutTitleText}>{item.sesion}</Text>
                     </View>
+                  </View>
 
+                  {!m.isRest && (
+                    <TouchableOpacity
+                      style={[
+                        styles.doneBtn,
+                        item.isCompleted && styles.doneBtnActive,
+                      ]}
+                      onPress={() => toggleCompletado(item.id)}
+                    >
+                      <Text
+                        style={[
+                          styles.doneBtnText,
+                          item.isCompleted && { color: '#020617' },
+                        ]}
+                      >
+                        {item.isCompleted ? '✓ Hecho' : 'Marcar'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {item.actividad_real && (
+                  <View style={styles.matchedActivityStrip}>
+                    <Text style={styles.matchedActivityText}>
+                      🚴‍♂️ Completado: {item.actividad_real.nombre} • {item.actividad_real.distancia_km} km • +{item.actividad_real.desnivel_m}m • {item.actividad_real.np}W NP • {item.actividad_real.tss} TSS
+                    </Text>
+                  </View>
+                )}
+
+                {!m.isRest ? (
+                  <>
                     <View style={styles.telemetryStrip}>
                       <View style={styles.stripMetricsRow}>
                         <Text style={styles.stripItem}>
-                          <Text style={styles.stripLabel}>Tiempo: </Text>
-                          <Text style={styles.stripValWhite}>{formatDurationHm(act.duracion_min)}</Text>
+                          <Text style={styles.stripLabel}>Dur: </Text>
+                          <Text style={styles.stripValWhite}>{formatDurationHm(m.durationMin)}</Text>
                         </Text>
                         <Text style={styles.stripItem}>
-                          <Text style={styles.stripLabel}>Dist: </Text>
-                          <Text style={styles.stripValWhite}>{act.distancia_km} km</Text>
-                        </Text>
-                        <Text style={styles.stripItem}>
-                          <Text style={styles.stripLabel}>Desnivel: </Text>
-                          <Text style={{ color: '#34d399', fontWeight: '800' }}>+{act.desnivel_m} m</Text>
-                        </Text>
-                        <Text style={styles.stripItem}>
-                          <Text style={styles.stripLabel}>NP: </Text>
-                          <Text style={{ color: '#38bdf8', fontWeight: '800' }}>{act.np}W</Text>
+                          <Text style={styles.stripLabel}>TSS: </Text>
+                          <Text style={{ color: '#fbbf24', fontWeight: '800' }}>
+                            {item.tss_real ? `${item.tss_real}/${m.tss}` : m.tss}
+                          </Text>
                         </Text>
                         <Text style={styles.stripItem}>
                           <Text style={styles.stripLabel}>IF: </Text>
-                          <Text style={{ color: '#fbbf24', fontWeight: '800' }}>{act.if_val}</Text>
+                          <Text style={{ color: '#34d399', fontWeight: '800' }}>{m.ifVal}</Text>
                         </Text>
-                        {act.hr_avg > 0 && (
-                          <Text style={styles.stripItem}>
-                            <Text style={styles.stripLabel}>FC Media: </Text>
-                            <Text style={{ color: '#fb7185', fontWeight: '800' }}>{act.hr_avg} bpm</Text>
-                          </Text>
-                        )}
-                        {act.kj > 0 && (
-                          <Text style={styles.stripItem}>
-                            <Text style={styles.stripLabel}>Trabajo: </Text>
-                            <Text style={{ color: '#c084fc', fontWeight: '800' }}>{act.kj} kJ</Text>
-                          </Text>
-                        )}
+                        <Text style={styles.stripItem}>
+                          <Text style={styles.stripLabel}>NP: </Text>
+                          <Text style={{ color: '#38bdf8', fontWeight: '800' }}>{m.np}W</Text>
+                        </Text>
+                      </View>
+                      <View style={styles.choBadge}>
+                        <Text style={styles.choBadgeText}>⚡ {m.choPerHour}</Text>
                       </View>
                     </View>
+
+                    <View style={styles.cardBody}>
+                      <View style={styles.powerChartBox}>
+                        <View
+                          style={[
+                            styles.ftpReferenceLine,
+                            { bottom: `${ftpLineBottomPct}%` },
+                          ]}
+                        >
+                          <Text style={styles.ftpReferenceLabel}>FTP {telemetria.ftp}W</Text>
+                        </View>
+                        <View style={styles.barsRow}>
+                          {m.segments.map((seg: any, sIdx: number) => {
+                            const heightPct = Math.max(
+                              12,
+                              Math.min(100, Math.round((seg.ftpPct / maxPctBar) * 100))
+                            );
+                            const z = getZoneForFtpPct(seg.ftpPct);
+                            return (
+                              <View
+                                key={sIdx}
+                                style={{
+                                  flex: Math.max(1, seg.durationMin),
+                                  height: `${heightPct}%`,
+                                  backgroundColor: z.color,
+                                  borderRadius: 3,
+                                  marginHorizontal: 1,
+                                }}
+                              />
+                            );
+                          })}
+                        </View>
+                      </View>
+
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
+                        <Text style={[styles.origenEstructuraText, { color: '#34d399', marginTop: 0 }]}>
+                          ✔ Bloques estructurados por el coach
+                        </Text>
+                        <Text style={styles.tapHintText}>Ver vatios y exportar ›</Text>
+                      </View>
+                    </View>
+                  </>
+                ) : (
+                  <View style={styles.restBody}>
+                    <Text style={styles.restSubText}>Día sin bici • Toca para ver la nota del entrenador</Text>
                   </View>
-                );
-              })
-            )}
-          </View>
+                )}
+              </TouchableOpacity>
+            );
+          })
         )}
       </ScrollView>
 
-      {/* ==================== MODAL DISPONIBILIDAD SEMANAL (L a D) ==================== */}
-      <Modal visible={dispModalVisible} transparent animationType="slide">
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHeaderRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>🕒 Disponibilidad Semanal Persistente</Text>
-                <Text style={styles.modalSubheader}>
-                  Tope de horas por día (0h = Día de Descanso fijo)
-                </Text>
-              </View>
-              <TouchableOpacity style={styles.closeIconBtn} onPress={() => setDispModalVisible(false)}>
-                <Text style={{ color: '#cbd5e1', fontWeight: 'bold' }}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={{ marginTop: 12, gap: 8 }}>
-              {DIAS_ORDEN_CONFIG.map((d) => {
-                const val = horasDia[d.key] ?? 0;
-                return (
-                  <View key={d.key} style={styles.dispRow}>
-                    <Text style={styles.dispDayLabel}>{d.label}</Text>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                      <TouchableOpacity
-                        style={styles.dispStepBtn}
-                        onPress={() => setHorasDia((p) => ({ ...p, [d.key]: Math.max(0, (p[d.key] || 0) - 0.5) }))}
-                      >
-                        <Text style={styles.dispStepBtnText}>−</Text>
-                      </TouchableOpacity>
-                      <Text style={[styles.dispValText, val === 0 && { color: '#64748b' }]}>
-                        {val === 0 ? 'Descanso' : `${val} h`}
-                      </Text>
-                      <TouchableOpacity
-                        style={styles.dispStepBtn}
-                        onPress={() => setHorasDia((p) => ({ ...p, [d.key]: Math.min(8, (p[d.key] || 0) + 0.5) }))}
-                      >
-                        <Text style={styles.dispStepBtnText}>+</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                );
-              })}
-            </View>
-
-            <TouchableOpacity style={[styles.exportBtn, { marginTop: 16 }]} onPress={guardarDisponibilidadBD}>
-              <Text style={styles.exportBtnText}>Guardar Disponibilidad en Base de Datos</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-
-      {/* ==================== MODAL AÑADIR OBJETIVO A / B / C ==================== */}
-      <Modal visible={objModalVisible} transparent animationType="slide">
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHeaderRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>🎯 Añadir Objetivo a la Temporada</Text>
-                <Text style={styles.modalSubheader}>
-                  Prioridad A (Principal), B (Secundario) o C (Preparatorio)
-                </Text>
-              </View>
-              <TouchableOpacity style={styles.closeIconBtn} onPress={() => setObjModalVisible(false)}>
-                <Text style={{ color: '#cbd5e1', fontWeight: 'bold' }}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={{ marginTop: 14, gap: 10 }}>
-              <Text style={styles.sectionMiniTitle}>NOMBRE DEL RETO O CARRERA</Text>
-              <TextInput
-                style={styles.modalInput}
-                placeholder="Ej: Quebrantahuesos, Everesting, Criterium..."
-                placeholderTextColor="#64748b"
-                value={nuevoObj.nombre}
-                onChangeText={(t) => setNuevoObj((p) => ({ ...p, nombre: t }))}
-              />
-
-              <Text style={styles.sectionMiniTitle}>FECHA META (YYYY-MM-DD)</Text>
-              <TextInput
-                style={styles.modalInput}
-                placeholder="2027-06-20"
-                placeholderTextColor="#64748b"
-                value={nuevoObj.fecha_meta}
-                onChangeText={(t) => setNuevoObj((p) => ({ ...p, fecha_meta: t }))}
-              />
-
-              <Text style={styles.sectionMiniTitle}>PRIORIDAD DEL OBJETIVO</Text>
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                {(['A', 'B', 'C'] as const).map((prio) => (
-                  <TouchableOpacity
-                    key={prio}
-                    style={[
-                      styles.prioBtn,
-                      nuevoObj.prioridad === prio && styles.prioBtnActive,
-                    ]}
-                    onPress={() => setNuevoObj((p) => ({ ...p, prioridad: prio }))}
-                  >
-                    <Text
-                      style={[
-                        styles.prioBtnText,
-                        nuevoObj.prioridad === prio && { color: '#020617' },
-                      ]}
-                    >
-                      Prioridad {prio}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-
-            <TouchableOpacity style={[styles.exportBtn, { marginTop: 18 }]} onPress={guardarNuevoObjetivoBD}>
-              <Text style={styles.exportBtnText}>Añadir Objetivo a mi Temporada</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-
-      {/* ==================== MODAL 1: LABORATORIO DE ZONAS Z1-Z7 & FC ==================== */}
+      {/* MODAL LABORATORIO DE ZONAS Z1-Z7 */}
       <Modal visible={zonesModalVisible} transparent animationType="slide">
         <View style={styles.modalBackdrop}>
           <View style={[styles.modalSheet, { maxHeight: '88%' }]}>
             <View style={styles.modalHeaderRow}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>⚡ Laboratorio Fisiológico: Coggan Z1-Z7 y FC</Text>
+                <Text style={styles.modalTitle}>⚡ Zonas Coggan Z1-Z7 y FC</Text>
                 <Text style={styles.modalSubheader}>
                   FTP: {telemetria.ftp}W ({wkg} W/kg) • LTHR: {telemetria.lthr} bpm • FC Máx: {telemetria.max_hr} bpm
                 </Text>
               </View>
-              <TouchableOpacity
-                style={styles.closeIconBtn}
-                onPress={() => setZonesModalVisible(false)}
-              >
+              <TouchableOpacity style={styles.closeIconBtn} onPress={() => setZonesModalVisible(false)}>
                 <Text style={{ color: '#cbd5e1', fontWeight: 'bold' }}>✕</Text>
               </TouchableOpacity>
             </View>
 
             <ScrollView style={{ marginTop: 12 }} showsVerticalScrollIndicator={false}>
-              <Text style={styles.zoneSectionHeader}>🔥 7 ZONAS DE POTENCIA (DR. ANDREW COGGAN)</Text>
+              <Text style={styles.zoneSectionHeader}>🔥 7 ZONAS DE POTENCIA (COGGAN)</Text>
               {COGGAN_ZONES.map((z) => {
                 const minW = Math.round(telemetria.ftp * (z.minPct / 100));
                 const maxW = Math.round(telemetria.ftp * (z.maxPct / 100));
-                const rangeStr =
-                  z.id === 'Z1'
-                    ? `< ${maxW}W`
-                    : z.id === 'Z7'
-                      ? `> ${minW}W`
-                      : `${minW} - ${maxW}W`;
+                const rangeStr = z.id === 'Z1' ? `< ${maxW}W` : z.id === 'Z7' ? `> ${minW}W` : `${minW} - ${maxW}W`;
                 return (
                   <View key={z.id} style={styles.zoneModalRow}>
                     <View style={[styles.stepZoneTag, { backgroundColor: z.bgBadge, borderColor: z.color }]}>
                       <Text style={[styles.stepZoneTagText, { color: z.color }]}>{z.id}</Text>
                     </View>
                     <View style={{ flex: 1, marginHorizontal: 10 }}>
-                      <Text style={styles.zoneModalName}>
-                        {z.name} ({z.minPct}-{z.id === 'Z7' ? 'MAX' : `${z.maxPct}%`})
-                      </Text>
+                      <Text style={styles.zoneModalName}>{z.name}</Text>
                       <Text style={styles.zoneModalDesc}>{z.desc}</Text>
                     </View>
-                    <View style={{ alignItems: 'flex-end' }}>
-                      <Text style={styles.zoneModalWatts}>{rangeStr}</Text>
-                      <Text style={styles.zoneModalWkg}>{(minW / telemetria.peso).toFixed(1)} W/kg</Text>
-                    </View>
+                    <Text style={styles.zoneModalWatts}>{rangeStr}</Text>
                   </View>
                 );
               })}
@@ -1670,14 +1076,8 @@ export default function CalendarioScreen() {
                 ❤️ 5 ZONAS DE FRECUENCIA CARDÍACA (LTHR)
               </Text>
               {HR_ZONES.map((hz) => {
-                const minBpm =
-                  hz.minLthrPct === 0
-                    ? Math.round(telemetria.lthr * 0.55)
-                    : Math.round(telemetria.lthr * (hz.minLthrPct / 100));
-                const maxBpm =
-                  hz.id === 'FC Z5'
-                    ? telemetria.max_hr
-                    : Math.round(telemetria.lthr * (hz.maxLthrPct / 100));
+                const minBpm = hz.minLthrPct === 0 ? Math.round(telemetria.lthr * 0.55) : Math.round(telemetria.lthr * (hz.minLthrPct / 100));
+                const maxBpm = hz.id === 'FC Z5' ? telemetria.max_hr : Math.round(telemetria.lthr * (hz.maxLthrPct / 100));
                 return (
                   <View key={hz.id} style={styles.zoneModalRow}>
                     <View style={{ flex: 1 }}>
@@ -1686,9 +1086,7 @@ export default function CalendarioScreen() {
                       </Text>
                       <Text style={styles.zoneModalDesc}>{hz.desc}</Text>
                     </View>
-                    <Text style={styles.zoneModalWatts}>
-                      {minBpm} - {maxBpm} bpm
-                    </Text>
+                    <Text style={styles.zoneModalWatts}>{minBpm} - {maxBpm} bpm</Text>
                   </View>
                 );
               })}
@@ -1697,7 +1095,7 @@ export default function CalendarioScreen() {
         </View>
       </Modal>
 
-      {/* ==================== MODAL 2: SELECTOR DE CICLOCOMPUTADOR ==================== */}
+      {/* MODAL SELECTOR DE CICLOCOMPUTADOR */}
       <Modal visible={selector.visible} transparent animationType="slide">
         <View style={styles.modalBackdrop}>
           <View style={styles.modalSheet}>
@@ -1713,9 +1111,7 @@ export default function CalendarioScreen() {
               }}
             >
               <Text style={styles.deviceOptionTitle}>🔵 Garmin / Wahoo / Suunto</Text>
-              <Text style={styles.deviceOptionSub}>
-                Sincronización directa en la nube por WiFi / Bluetooth
-              </Text>
+              <Text style={styles.deviceOptionSub}>Sincronización directa en la nube por WiFi / Bluetooth</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -1726,120 +1122,18 @@ export default function CalendarioScreen() {
               }}
             >
               <Text style={styles.deviceOptionTitle}>⚪ Bryton / IGPSport / Otros</Text>
-              <Text style={styles.deviceOptionSub}>
-                Generar y compartir archivo binario universal (.FIT)
-              </Text>
+              <Text style={styles.deviceOptionSub}>Generar y compartir archivo binario universal (.FIT)</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.cancelModalBtn}
-              onPress={() => setSelector({ ...selector, visible: false })}
-            >
+            <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setSelector({ ...selector, visible: false })}>
               <Text style={styles.cancelModalText}>Cancelar</Text>
             </TouchableOpacity>
           </View>
         </View>
       </Modal>
 
-      {/* ==================== MODAL 3: PLAN MACROCICLO ==================== */}
-      <Modal visible={planModalVisible} transparent animationType="slide">
-        <View style={styles.modalBackdrop}>
-          <View style={[styles.modalSheet, { height: '90%' }]}>
-            <View style={styles.modalHeaderRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>
-                  {macrociclo.objetivo} — {macrociclo.fecha_meta}
-                </Text>
-                <Text style={styles.modalSubheader}>
-                  {macrociclo.total_fases} fases estructuradas a medida
-                </Text>
-              </View>
-              <TouchableOpacity
-                style={styles.closeIconBtn}
-                onPress={() => setPlanModalVisible(false)}
-              >
-                <Text style={{ color: '#cbd5e1', fontWeight: 'bold' }}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView style={{ marginTop: 14 }} showsVerticalScrollIndicator={false}>
-              {macrociclo.resumen_estrategico ? (
-                <View style={styles.estrategiaBox}>
-                  <Text style={styles.estrategiaText}>{macrociclo.resumen_estrategico}</Text>
-                </View>
-              ) : (
-                <View style={styles.estrategiaBox}>
-                  <Text style={styles.estrategiaText}>
-                    Aún no has generado los bloques de tu temporada. Ve a la pestaña Coach IA y dile:
-                    "Estructúrame el plan por bloques para mi objetivo".
-                  </Text>
-                </View>
-              )}
-
-              <View style={{ marginTop: 18, paddingLeft: 4 }}>
-                {macrociclo.fases.map((fase: any, index: number) => {
-                  const esUltima = index === macrociclo.fases.length - 1;
-                  const esActiva = fase.estado === 'activa';
-                  const esCompletada = fase.estado === 'completada';
-
-                  return (
-                    <View key={fase.id || index} style={styles.timelineItemRow}>
-                      <View style={styles.timelineLeftCol}>
-                        <View
-                          style={[
-                            styles.timelineCircle,
-                            esActiva && styles.timelineCircleActive,
-                            esCompletada && styles.timelineCircleDone,
-                          ]}
-                        >
-                          {esActiva && <View style={styles.timelineInnerDotActive} />}
-                          {esCompletada && (
-                            <Text style={{ fontSize: 10, color: '#020617', fontWeight: '900' }}>✓</Text>
-                          )}
-                        </View>
-                        {!esUltima && (
-                          <View
-                            style={[
-                              styles.timelineLine,
-                              esCompletada && { backgroundColor: '#10b981' },
-                            ]}
-                          />
-                        )}
-                      </View>
-
-                      <View style={[styles.timelineRightCol, esActiva && styles.timelineCardActive]}>
-                        <Text style={styles.timelineDates}>
-                          {formatearRangoFechas(fase.fecha_inicio, fase.fecha_fin)}
-                        </Text>
-                        <Text style={styles.timelinePhaseTitle}>{fase.nombre}</Text>
-                        <Text style={styles.timelinePhaseDesc}>{fase.descripcion}</Text>
-
-                        {fase.foco ? (
-                          <Text style={styles.timelinePhaseFocus}>🎯 Foco: {fase.foco}</Text>
-                        ) : null}
-
-                        {esActiva && (
-                          <Text style={styles.quedanDiasText}>
-                            Quedan {fase.dias_restantes} días
-                          </Text>
-                        )}
-                      </View>
-                    </View>
-                  );
-                })}
-              </View>
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
-
-      {/* ==================== MODAL 4: DETALLE DE SESIÓN ==================== */}
-      <Modal
-        visible={sesionDetalle !== null}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setDetalleId(null)}
-      >
+      {/* MODAL DETALLE DE SESIÓN */}
+      <Modal visible={sesionDetalle !== null} transparent animationType="slide" onRequestClose={() => setDetalleId(null)}>
         <View style={styles.modalBackdrop}>
           <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setDetalleId(null)} />
           {sesionDetalle && renderDetalleSesion(sesionDetalle)}
@@ -1853,7 +1147,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#020617', paddingTop: 42 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#020617' },
   loadingText: { marginTop: 12, color: '#94a3b8', fontSize: 13, fontFamily: MONO_FONT },
-  scrollContent: { padding: 14, paddingBottom: 130 },
+  scrollContent: { padding: 14, paddingBottom: 120 },
 
   navbar: {
     backgroundColor: '#0f172a',
@@ -1864,287 +1158,122 @@ const styles = StyleSheet.create({
   },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   brandIcon: {
-    width: 38,
-    height: 38,
+    width: 36,
+    height: 36,
     borderRadius: 10,
     backgroundColor: '#10b981',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  brandTitle: { fontSize: 17, fontWeight: '900', color: '#ffffff', letterSpacing: 0.5 },
-  proWattBadge: {
-    backgroundColor: 'rgba(245,158,11,0.15)',
-    borderColor: 'rgba(245,158,11,0.35)',
-    borderWidth: 1,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 5,
-  },
-  proWattBadgeText: { color: '#fbbf24', fontSize: 9, fontWeight: '800', fontFamily: MONO_FONT },
-  brandSubtitle: { fontSize: 11, color: '#94a3b8', marginTop: 2 },
+  brandTitle: { fontSize: 16, fontWeight: '900', color: '#ffffff', letterSpacing: 0.4 },
+  brandSubtitle: { fontSize: 11, color: '#94a3b8', marginTop: 1 },
   zonesBtn: {
     backgroundColor: '#1e293b',
     borderColor: '#334155',
     borderWidth: 1,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 8,
-  },
-  zonesBtnText: { color: '#f8fafc', fontSize: 10, fontWeight: '800' },
-
-  telemetryPillsBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#020617',
-    borderColor: '#1e293b',
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingVertical: 6,
     paddingHorizontal: 10,
-    marginTop: 10,
-    flexWrap: 'wrap',
-    gap: 4,
+    paddingVertical: 6,
+    borderRadius: 10,
   },
-  pillItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  pillLabel: { fontSize: 11, color: '#64748b', fontWeight: '700' },
-  pillValue: { fontSize: 12, fontWeight: '800', fontFamily: MONO_FONT },
-  pillDivider: { width: 1, height: 12, backgroundColor: '#1e293b' },
+  zonesBtnText: { color: '#f8fafc', fontSize: 11, fontWeight: '800' },
 
-  // Widget Semáforo Rest or Train
   restOrTrainCard: {
     backgroundColor: '#0f172a',
-    borderRadius: 16,
+    borderRadius: 18,
     borderWidth: 1,
     padding: 12,
     marginBottom: 12,
   },
-  rtIndicatorDot: { width: 9, height: 9, borderRadius: 5 },
-  rtOverline: { fontSize: 10, fontWeight: '900', color: '#94a3b8', letterSpacing: 0.6, fontFamily: MONO_FONT },
-  rtVerdictBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, borderWidth: 1 },
-  rtVerdictText: { fontSize: 10, fontWeight: '900', fontFamily: MONO_FONT },
-  rtAdviceText: { fontSize: 11.5, color: '#cbd5e1', marginTop: 6, lineHeight: 17 },
-
-  // Conmutador Plan vs Realizadas
-  segmentedSwitch: {
-    flexDirection: 'row',
-    backgroundColor: '#0f172a',
-    borderRadius: 14,
-    padding: 4,
-    borderWidth: 1,
-    borderColor: '#1e293b',
-    marginBottom: 14,
-  },
-  segmentBtn: {
-    flex: 1,
-    paddingVertical: 9,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  segmentBtnActive: {
-    backgroundColor: '#10b981',
-  },
-  segmentBtnText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#94a3b8',
-  },
-  segmentBtnTextActive: {
-    color: '#020617',
-    fontWeight: '900',
-  },
-
-  matchedActivityStrip: {
-    backgroundColor: 'rgba(16,185,129,0.12)',
-    borderBottomWidth: 1,
-    borderColor: 'rgba(16,185,129,0.3)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  matchedActivityText: {
-    fontSize: 10.5,
-    fontWeight: '800',
-    color: '#34d399',
-    fontFamily: MONO_FONT,
-  },
-  realActivityBanner: {
-    backgroundColor: 'rgba(16,185,129,0.12)',
-    borderColor: '#10b981',
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 12,
-  },
-  realActivityTitle: { fontSize: 11, fontWeight: '900', color: '#34d399', marginBottom: 4 },
-  realActivitySub: { fontSize: 11, color: '#e2e8f0', fontFamily: MONO_FONT, lineHeight: 16 },
-
-  objSeasonPill: {
-    backgroundColor: '#020617',
-    borderColor: '#334155',
-    borderWidth: 1,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-  },
-  objSeasonPillText: { fontSize: 10, color: '#38bdf8', fontWeight: '800', fontFamily: MONO_FONT },
-
-  dispRow: {
+  rtTopRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#020617',
-    paddingHorizontal: 12,
+    gap: 8,
+  },
+  rtIndicatorDot: { width: 8, height: 8, borderRadius: 4 },
+  rtOverline: { fontSize: 10, fontWeight: '900', color: '#94a3b8', fontFamily: MONO_FONT, flexShrink: 1 },
+  rtVerdictBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, borderWidth: 1, flexShrink: 0 },
+  rtVerdictText: { fontSize: 10, fontWeight: '900', fontFamily: MONO_FONT },
+  rtAdviceText: { fontSize: 11.5, color: '#cbd5e1', marginTop: 6, lineHeight: 16 },
+
+  checkinBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 6,
+    marginTop: 10,
+  },
+  checkinBtn: {
+    flex: 1,
     paddingVertical: 8,
+    paddingHorizontal: 4,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1e293b',
-  },
-  dispDayLabel: { fontSize: 13, fontWeight: '800', color: '#f8fafc' },
-  dispStepBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 8,
-    backgroundColor: '#1e293b',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  dispStepBtnText: { color: '#38bdf8', fontSize: 16, fontWeight: '900' },
-  dispValText: { fontSize: 13, fontWeight: '900', color: '#34d399', width: 70, textAlign: 'center', fontFamily: MONO_FONT },
-
-  modalInput: {
-    backgroundColor: '#020617',
-    borderWidth: 1,
-    borderColor: '#1e293b',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#ffffff',
-    fontSize: 13,
-  },
-  prioBtn: {
-    flex: 1,
-    backgroundColor: '#020617',
-    borderWidth: 1,
-    borderColor: '#334155',
-    paddingVertical: 10,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  prioBtnActive: { backgroundColor: '#10b981', borderColor: '#34d399' },
-  prioBtnText: { color: '#e2e8f0', fontWeight: '800', fontSize: 12 },
+  checkinBtnText: { fontSize: 10, fontWeight: '800', fontFamily: MONO_FONT },
 
   dashboardPanel: {
     backgroundColor: '#0f172a',
-    borderRadius: 20,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: '#1e293b',
-    padding: 14,
+    padding: 12,
     marginBottom: 14,
   },
   dashboardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     borderBottomWidth: 1,
     borderColor: '#1e293b',
-    paddingBottom: 12,
+    paddingBottom: 10,
     gap: 8,
   },
-  panelTitle: { fontSize: 15, fontWeight: '800', color: '#ffffff' },
-  panelSubtitle: { fontSize: 11, color: '#94a3b8', marginTop: 3 },
+  panelTitle: { fontSize: 14, fontWeight: '800', color: '#ffffff' },
+  panelSubtitle: { fontSize: 11, color: '#94a3b8', marginTop: 2, fontFamily: MONO_FONT },
   modelBadge: {
     backgroundColor: 'rgba(14,165,233,0.15)',
     borderColor: 'rgba(14,165,233,0.35)',
     borderWidth: 1,
-    paddingHorizontal: 8,
+    paddingHorizontal: 7,
     paddingVertical: 2,
     borderRadius: 99,
   },
-  modelBadgeText: { color: '#38bdf8', fontSize: 10, fontWeight: '800' },
+  modelBadgeText: { color: '#38bdf8', fontSize: 9.5, fontWeight: '800' },
   complianceBadge: {
     backgroundColor: 'rgba(16,185,129,0.12)',
     borderColor: 'rgba(16,185,129,0.35)',
     borderWidth: 1,
     paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
+    paddingVertical: 3,
+    borderRadius: 8,
   },
-  complianceBadgeText: { color: '#34d399', fontSize: 11, fontWeight: '900', fontFamily: MONO_FONT },
+  complianceBadgeText: { color: '#34d399', fontSize: 10.5, fontWeight: '900', fontFamily: MONO_FONT },
+  analiticaToggleText: { fontSize: 10, fontWeight: '800', color: '#34d399' },
 
-  kpiGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 8, marginTop: 12 },
+  kpiGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 8, marginTop: 10 },
   kpiCard: {
     width: '48.5%',
     backgroundColor: '#020617',
     borderColor: '#1e293b',
     borderWidth: 1,
-    borderRadius: 14,
-    padding: 11,
+    borderRadius: 12,
+    padding: 10,
   },
-  kpiCardFullWidth: {
-    width: '100%',
-    borderColor: 'rgba(245,158,11,0.25)',
-  },
-  kpiLabel: { fontSize: 10, fontWeight: '800', color: '#94a3b8' },
-  kpiValRow: { flexDirection: 'row', alignItems: 'baseline', gap: 4, marginTop: 4 },
-  kpiMainVal: { fontSize: 20, fontWeight: '900', color: '#ffffff', fontFamily: MONO_FONT },
-  kpiUnit: { fontSize: 11, color: '#64748b', fontFamily: MONO_FONT, fontWeight: '700' },
-  kpiSub: { fontSize: 10, color: '#94a3b8', marginTop: 3, fontFamily: MONO_FONT },
+  kpiLabel: { fontSize: 9.5, fontWeight: '800', color: '#94a3b8' },
+  kpiMainVal: { fontSize: 17, fontWeight: '900', color: '#ffffff', fontFamily: MONO_FONT, marginTop: 3 },
+  kpiSub: { fontSize: 10, color: '#94a3b8', marginTop: 2, fontFamily: MONO_FONT },
 
-  zonesDistributionSection: {
-    marginTop: 14,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderColor: '#1e293b',
-  },
-  sectionMiniTitle: { fontSize: 10, fontWeight: '800', color: '#94a3b8', letterSpacing: 0.4 },
-  zoneSplitText: { fontSize: 11, color: '#cbd5e1', fontFamily: MONO_FONT, marginTop: 3 },
-  stackedBarContainer: {
-    height: 12,
-    backgroundColor: '#020617',
-    borderRadius: 99,
-    overflow: 'hidden',
-    flexDirection: 'row',
-    borderWidth: 1,
-    borderColor: '#1e293b',
-    padding: 1,
-    gap: 1,
-  },
-  zonesLegendGrid: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 4,
-    marginTop: 8,
-  },
-  zoneLegendPill: {
-    flex: 1,
-    backgroundColor: '#020617',
-    borderColor: '#1e293b',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingVertical: 5,
-    paddingHorizontal: 3,
-    alignItems: 'center',
-  },
-  zonePillId: { fontSize: 10, fontWeight: '900', fontFamily: MONO_FONT },
-  zonePillPct: { fontSize: 8, color: '#64748b', fontFamily: MONO_FONT, marginTop: 1 },
-  zonePillMins: { fontSize: 9, fontWeight: '800', color: '#ffffff', fontFamily: MONO_FONT, marginTop: 2 },
-
-  progressTrack: {
-    height: 8,
-    backgroundColor: '#1e293b',
-    borderRadius: 99,
-    overflow: 'hidden',
-  },
+  progressTrack: { height: 6, backgroundColor: '#1e293b', borderRadius: 99, overflow: 'hidden' },
   progressFill: { height: '100%', backgroundColor: '#10b981', borderRadius: 99 },
-
-  sectionMainSubtitle: { fontSize: 11, color: '#94a3b8' },
 
   workoutCard: {
     backgroundColor: '#0f172a',
-    borderRadius: 20,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: '#1e293b',
-    marginBottom: 14,
+    marginBottom: 12,
     overflow: 'hidden',
   },
   workoutCardCompleted: { borderColor: 'rgba(16,185,129,0.6)' },
@@ -2159,9 +1288,9 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   dayAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
+    width: 38,
+    height: 38,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
@@ -2170,32 +1299,41 @@ const styles = StyleSheet.create({
   dayAvatarCompleted: { backgroundColor: '#10b981', borderColor: '#34d399' },
   dayAvatarRest: { backgroundColor: '#0f172a', borderColor: '#1e293b' },
   dayAvatarShort: { fontSize: 10, fontWeight: '900', color: '#34d399', fontFamily: MONO_FONT },
-  dayAvatarNum: { fontSize: 11, fontWeight: '900', color: '#ffffff', fontFamily: MONO_FONT },
-  dayNameText: { fontSize: 11, fontWeight: '800', color: '#34d399', textTransform: 'uppercase' },
-  envBadge: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6, borderWidth: 1 },
+  dayAvatarNum: { fontSize: 10.5, fontWeight: '900', color: '#ffffff', fontFamily: MONO_FONT },
+  dayNameText: { fontSize: 10.5, fontWeight: '800', color: '#34d399', textTransform: 'uppercase' },
+  envBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, borderWidth: 1 },
   envIndoor: { backgroundColor: 'rgba(245,158,11,0.15)', borderColor: 'rgba(245,158,11,0.35)' },
   envOutdoor: { backgroundColor: 'rgba(14,165,233,0.15)', borderColor: 'rgba(14,165,233,0.35)' },
   envRest: { backgroundColor: '#1e293b', borderColor: '#334155' },
-  envBadgeText: { fontSize: 10, fontWeight: '800' },
-  workoutTitleText: { fontSize: 15, fontWeight: '800', color: '#ffffff', marginTop: 3 },
+  envBadgeText: { fontSize: 9.5, fontWeight: '800' },
+  workoutTitleText: { fontSize: 14.5, fontWeight: '800', color: '#ffffff', marginTop: 2 },
 
   doneBtn: {
     backgroundColor: '#1e293b',
     borderColor: '#334155',
     borderWidth: 1,
     paddingHorizontal: 10,
-    paddingVertical: 7,
+    paddingVertical: 6,
     borderRadius: 10,
   },
   doneBtnActive: { backgroundColor: '#10b981', borderColor: '#34d399' },
   doneBtnText: { fontSize: 11, fontWeight: '800', color: '#e2e8f0' },
+
+  matchedActivityStrip: {
+    backgroundColor: 'rgba(16,185,129,0.12)',
+    borderBottomWidth: 1,
+    borderColor: 'rgba(16,185,129,0.3)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  matchedActivityText: { fontSize: 10.5, fontWeight: '800', color: '#34d399', fontFamily: MONO_FONT },
 
   telemetryStrip: {
     backgroundColor: '#020617',
     borderBottomWidth: 1,
     borderColor: '#1e293b',
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 7,
     flexDirection: 'row',
     flexWrap: 'wrap',
     alignItems: 'center',
@@ -2218,7 +1356,7 @@ const styles = StyleSheet.create({
 
   cardBody: { padding: 12 },
   powerChartBox: {
-    height: 82,
+    height: 76,
     backgroundColor: '#020617',
     borderColor: '#1e293b',
     borderWidth: 1,
@@ -2227,12 +1365,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     position: 'relative',
   },
-  barsRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    height: '100%',
-    width: '100%',
-  },
+  barsRow: { flexDirection: 'row', alignItems: 'flex-end', height: '100%', width: '100%' },
   ftpReferenceLine: {
     position: 'absolute',
     left: 6,
@@ -2243,13 +1376,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
     alignItems: 'flex-end',
   },
-  ftpReferenceLabel: {
-    color: '#fbbf24',
-    fontSize: 8,
-    fontWeight: '800',
-    fontFamily: MONO_FONT,
-    marginBottom: 1,
-  },
+  ftpReferenceLabel: { color: '#fbbf24', fontSize: 8, fontWeight: '800', fontFamily: MONO_FONT, marginBottom: 1 },
 
   stepRow: {
     backgroundColor: '#020617',
@@ -2260,19 +1387,14 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     gap: 4,
   },
-  stepZoneTag: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 5,
-    borderWidth: 1,
-  },
+  stepZoneTag: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5, borderWidth: 1 },
   stepZoneTagText: { fontSize: 10, fontWeight: '900', fontFamily: MONO_FONT },
   stepRepsText: { fontSize: 12, fontWeight: '900', color: '#ffffff', fontFamily: MONO_FONT },
   stepLabelText: { fontSize: 12, fontWeight: '600', color: '#cbd5e1', flex: 1 },
   stepWattsInterval: { fontSize: 11, fontWeight: '700', color: '#fbbf24', fontFamily: MONO_FONT },
   stepWattsSteady: { fontSize: 11, fontWeight: '700', color: '#f8fafc', fontFamily: MONO_FONT },
   stepRecupText: { fontSize: 10, fontWeight: '600', color: '#94a3b8', fontFamily: MONO_FONT },
-
+  sectionMiniTitle: { fontSize: 10, fontWeight: '800', color: '#94a3b8', letterSpacing: 0.4 },
   hydrationText: { fontSize: 11, color: '#38bdf8', fontWeight: '700', fontFamily: MONO_FONT },
 
   exportBtn: {
@@ -2284,8 +1406,8 @@ const styles = StyleSheet.create({
   },
   exportBtnText: { color: '#020617', fontSize: 13, fontWeight: '900' },
 
-  restBody: { padding: 14, gap: 4 },
-  restSubText: { fontSize: 10, color: '#64748b', fontFamily: MONO_FONT },
+  restBody: { padding: 14 },
+  restSubText: { fontSize: 10.5, color: '#64748b', fontFamily: MONO_FONT },
 
   emptyBox: {
     backgroundColor: '#0f172a',
@@ -2298,11 +1420,7 @@ const styles = StyleSheet.create({
   emptyTitle: { fontSize: 15, fontWeight: '800', color: '#ffffff', marginBottom: 6 },
   emptyText: { fontSize: 12, color: '#94a3b8', textAlign: 'center', lineHeight: 18 },
 
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.75)',
-    justifyContent: 'flex-end',
-  },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'flex-end' },
   modalSheet: {
     backgroundColor: '#0f172a',
     borderTopLeftRadius: 24,
@@ -2330,13 +1448,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  zoneSectionHeader: {
-    fontSize: 11,
-    fontWeight: '900',
-    color: '#fbbf24',
-    marginBottom: 8,
-    letterSpacing: 0.5,
-  },
+  zoneSectionHeader: { fontSize: 11, fontWeight: '900', color: '#fbbf24', marginBottom: 8 },
   zoneModalRow: {
     backgroundColor: '#020617',
     borderColor: '#1e293b',
@@ -2351,7 +1463,6 @@ const styles = StyleSheet.create({
   zoneModalName: { fontSize: 12, fontWeight: '800', color: '#ffffff' },
   zoneModalDesc: { fontSize: 10, color: '#94a3b8', marginTop: 2 },
   zoneModalWatts: { fontSize: 12, fontWeight: '900', color: '#ffffff', fontFamily: MONO_FONT },
-  zoneModalWkg: { fontSize: 10, color: '#64748b', fontFamily: MONO_FONT },
 
   deviceOption: {
     padding: 15,
@@ -2366,163 +1477,19 @@ const styles = StyleSheet.create({
   cancelModalBtn: { marginTop: 6, padding: 12, alignItems: 'center' },
   cancelModalText: { fontSize: 15, color: '#f43f5e', fontWeight: '800' },
 
-  macroBanner: {
-    backgroundColor: '#0f172a',
-    borderColor: 'rgba(16,185,129,0.45)',
+  realActivityBanner: {
+    backgroundColor: 'rgba(16,185,129,0.12)',
+    borderColor: '#10b981',
     borderWidth: 1,
-    borderRadius: 18,
-    padding: 14,
+    borderRadius: 12,
+    padding: 12,
     marginBottom: 12,
   },
-  phaseRingActive: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 3,
-    borderColor: '#10b981',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  phaseRingInnerDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#10b981',
-  },
-  macroBannerOverline: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: '#34d399',
-    fontFamily: MONO_FONT,
-  },
-  macroBannerTitle: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: '#ffffff',
-    marginTop: 1,
-  },
-  macroBannerDesc: {
-    fontSize: 12,
-    color: '#cbd5e1',
-    lineHeight: 17,
-  },
-  verPlanPill: {
-    backgroundColor: 'rgba(16,185,129,0.15)',
-    borderColor: 'rgba(16,185,129,0.35)',
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 10,
-  },
-  verPlanPillText: {
-    color: '#34d399',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  quedanDiasText: {
-    color: '#10b981',
-    fontSize: 12,
-    fontWeight: '800',
-    marginTop: 6,
-  },
-  estrategiaBox: {
-    backgroundColor: '#020617',
-    borderColor: '#1e293b',
-    borderWidth: 1,
-    borderRadius: 16,
-    padding: 14,
-  },
-  estrategiaText: {
-    fontSize: 13,
-    color: '#e2e8f0',
-    lineHeight: 20,
-  },
-  timelineItemRow: {
-    flexDirection: 'row',
-    alignItems: 'stretch',
-  },
-  timelineLeftCol: {
-    width: 32,
-    alignItems: 'center',
-  },
-  timelineCircle: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    borderWidth: 2,
-    borderColor: '#475569',
-    backgroundColor: '#020617',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 2,
-  },
-  timelineCircleActive: {
-    borderColor: '#10b981',
-    borderWidth: 3,
-  },
-  timelineCircleDone: {
-    backgroundColor: '#10b981',
-    borderColor: '#10b981',
-  },
-  timelineInnerDotActive: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#10b981',
-  },
-  timelineLine: {
-    width: 2,
-    flex: 1,
-    backgroundColor: '#1e293b',
-    marginVertical: 2,
-  },
-  timelineRightCol: {
-    flex: 1,
-    paddingBottom: 22,
-    paddingLeft: 10,
-  },
-  timelineCardActive: {
-    backgroundColor: 'rgba(16,185,129,0.06)',
-    borderColor: 'rgba(16,185,129,0.25)',
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 12,
-    marginBottom: 14,
-  },
-  timelineDates: {
-    fontSize: 12,
-    color: '#94a3b8',
-    fontFamily: MONO_FONT,
-    fontWeight: '700',
-  },
-  timelinePhaseTitle: {
-    fontSize: 17,
-    fontWeight: '900',
-    color: '#ffffff',
-    marginTop: 2,
-    marginBottom: 6,
-  },
-  timelinePhaseDesc: {
-    fontSize: 13,
-    color: '#cbd5e1',
-    lineHeight: 19,
-  },
-  timelinePhaseFocus: {
-    fontSize: 11,
-    color: '#fbbf24',
-    fontFamily: MONO_FONT,
-    marginTop: 6,
-    fontWeight: '700',
-  },
-  tapHintRow: {
-    marginTop: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-  },
+  realActivityTitle: { fontSize: 11, fontWeight: '900', color: '#34d399', marginBottom: 4 },
+  realActivitySub: { fontSize: 11, color: '#e2e8f0', fontFamily: MONO_FONT, lineHeight: 16 },
+
   tapHintText: { fontSize: 11, color: '#34d399', fontWeight: '700' },
-  origenEstructuraText: { fontSize: 10, fontWeight: '700', marginTop: 8 },
+  origenEstructuraText: { fontSize: 10, fontWeight: '700' },
   coachNoteCard: {
     backgroundColor: 'rgba(16,185,129,0.07)',
     borderColor: 'rgba(16,185,129,0.3)',
@@ -2532,25 +1499,4 @@ const styles = StyleSheet.create({
   },
   coachNoteCardTitle: { fontSize: 12, fontWeight: '900', color: '#34d399', marginBottom: 6 },
   coachNoteCardText: { fontSize: 14, color: '#e2e8f0', lineHeight: 21 },
-  analiticaToggleText: { fontSize: 10, fontWeight: '800', color: '#34d399' },
-  checkinBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 6,
-    marginBottom: 14,
-  },
-  checkinBtn: {
-    flex: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  checkinBtnText: {
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: MONO_FONT,
-  },
 });

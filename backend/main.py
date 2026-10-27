@@ -29,7 +29,6 @@ models.Base.metadata.create_all(bind=engine)
 
 
 def asegurar_columnas_nuevas():
-    """Añade de forma idempotente todas las columnas nuevas en tablas existentes."""
     migraciones = [
         "ALTER TABLE entrenamientos_programados ADD COLUMN IF NOT EXISTS estructura TEXT",
         "ALTER TABLE entrenamientos_programados ADD COLUMN IF NOT EXISTS tss_real INTEGER",
@@ -137,7 +136,6 @@ def _num(valor, defecto, minimo, maximo):
 
 
 def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
-    """Consulta en tiempo real el perfil del ciclista y su Wellness en Intervals.icu."""
     ahora = datetime.now()
     if (
         not forzar
@@ -256,50 +254,51 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
 
 
 def calcular_niveles_progresion(db: Session, ftp: int):
-    """Calcula los Niveles de Progresión (1.0 - 10.0 estilo TrainerRoad/Xert) de los últimos 60 días."""
-    hace_60d = datetime.now() - timedelta(days=60)
+    """Calcula niveles de progresión realistas (1.0 a 9.8) sobre los últimos 42 días evitando techos artificiales de 10.0."""
+    hace_42d = datetime.now() - timedelta(days=42)
     acts = db.query(models.Activity).filter(
         models.Activity.usuario_id == 1,
-        models.Activity.start_date_local >= hace_60d
+        models.Activity.start_date_local >= hace_42d
     ).all()
 
     if not acts:
         return {
-            "resistencia_z2": 4.0,
-            "tempo_torque": 3.8,
-            "sweet_spot": 4.2,
+            "resistencia_z2": 4.5,
+            "tempo_torque": 4.2,
+            "sweet_spot": 4.6,
             "umbral_ftp": 4.0,
-            "vo2max": 3.5,
-            "durabilidad_kj": 3.8,
+            "vo2max": 3.4,
+            "durabilidad_kj": 4.4,
             "distribucion": {"z1_z2_pct": 78, "z3_z4_pct": 16, "z5_pct": 6, "modelo": "Piramidal Base"}
         }
 
+    horas_totales = sum(((a.moving_time or 0) / 3600.0) for a in acts)
+    horas_sem = horas_totales / 6.0
     max_horas = max(((a.moving_time or 0) / 3600.0) for a in acts)
-    max_desnivel = max((a.total_elevation_gain or 0) for a in acts)
-    max_tss = max((a.tss or 0) for a in acts)
+    desnivel_medio_salida = sum((a.total_elevation_gain or 0) for a in acts) / max(1, len(acts))
 
     salidas_ss = 0
     salidas_umbral = 0
     salidas_vo2 = 0
-    max_kj = 0.0
+    salidas_2000kj = 0
     tiempo_baja = 0.0
     tiempo_media = 0.0
     tiempo_alta = 0.0
 
     for a in acts:
         dur_h = (a.moving_time or 0) / 3600.0
-        np_act = a.normalized_power or (ftp * 0.68)
+        np_act = a.normalized_power or (ftp * 0.66)
         if_act = np_act / max(150, ftp)
         kj_act = (np_act * (a.moving_time or 0)) / 1000.0
-        if kj_act > max_kj:
-            max_kj = kj_act
+        if kj_act >= 2000:
+            salidas_2000kj += 1
 
         if if_act < 0.76:
             tiempo_baja += dur_h
-        elif if_act <= 0.96:
+        elif if_act <= 0.94:
             tiempo_media += dur_h
             salidas_ss += 1
-        elif if_act <= 1.04:
+        elif if_act <= 1.03:
             tiempo_media += dur_h
             salidas_umbral += 1
         else:
@@ -312,12 +311,13 @@ def calcular_niveles_progresion(db: Session, ftp: int):
     z5_pct = max(0, 100 - z1_z2_pct - z3_z4_pct)
     modelo = "Polarizado 80/20" if (z1_z2_pct >= 75 and z5_pct >= z3_z4_pct) else "Piramidal Científico"
 
-    lvl_z2 = round(min(10.0, max(2.0, 2.0 + (max_horas / 6.0) * 7.5)), 1)
-    lvl_torque = round(min(10.0, max(2.0, 2.2 + (max_desnivel / 3000.0) * 7.0)), 1)
-    lvl_ss = round(min(10.0, max(2.0, 3.0 + min(5.5, salidas_ss * 0.45) + (max_tss / 300.0) * 1.5)), 1)
-    lvl_ftp = round(min(10.0, max(2.0, 3.0 + min(5.0, salidas_umbral * 0.6) + (salidas_ss * 0.25))), 1)
-    lvl_vo2 = round(min(10.0, max(2.0, 2.8 + min(6.0, salidas_vo2 * 0.8) + (z5_pct * 0.15))), 1)
-    lvl_durabilidad = round(min(10.0, max(2.0, 2.0 + (max_kj / 3500.0) * 7.5)), 1)
+    # Escala progresiva calibrada (9.5 requiere volumen de élite sostenido)
+    lvl_z2 = round(min(9.5, max(2.5, 3.2 + (horas_sem * 0.42) + min(2.2, max_horas * 0.35))), 1)
+    lvl_torque = round(min(9.4, max(2.5, 3.0 + (desnivel_medio_salida / 420.0) * 1.4 + min(2.0, salidas_ss * 0.25))), 1)
+    lvl_ss = round(min(9.4, max(2.5, 3.4 + min(4.8, salidas_ss * 0.55))), 1)
+    lvl_ftp = round(min(9.2, max(2.4, 3.0 + min(4.5, salidas_umbral * 0.85) + min(1.5, salidas_ss * 0.18))), 1)
+    lvl_vo2 = round(min(9.2, max(2.2, 2.8 + min(5.2, salidas_vo2 * 0.95) + (z5_pct * 0.12))), 1)
+    lvl_durabilidad = round(min(9.5, max(2.5, 3.5 + min(4.2, salidas_2000kj * 0.65) + min(1.5, max_horas * 0.25))), 1)
 
     return {
         "resistencia_z2": lvl_z2,
@@ -336,7 +336,7 @@ def calcular_niveles_progresion(db: Session, ftp: int):
 
 
 def generar_estructura_respaldo(tipo_sesion: str, duracion_total: int):
-    """Genera una estructura fisiológica exacta cuando se requiere respaldo o adaptación."""
+    """Genera una estructura fisiológica exacta para cualquier tipo de sesión."""
     dur = int(duracion_total or 0)
     if dur <= 0 or "descanso" in (tipo_sesion or "").lower():
         return None
@@ -346,15 +346,29 @@ def generar_estructura_respaldo(tipo_sesion: str, duracion_total: int):
     enf = max(10, round(dur * 0.10))
     cuerpo = max(15, dur - cal - enf)
 
-    if any(k in texto for k in ["30/15", "ronnestad", "rønnestad", "micro"]):
-        reps = 10 if cuerpo >= 35 else 8
-        usado = round(reps * 0.75)
-        resto_z2 = max(5, cuerpo - usado)
+    if any(k in texto for k in ["30/15", "ronnestad", "rønnestad", "micro", "sprint"]):
+        reps = 8 if "sprint" not in texto else 6
+        trab_m = 0.5 if "sprint" not in texto else 0.25
+        rec_m = 0.25 if "sprint" not in texto else 2.75
+        pct_t = 120 if "sprint" not in texto else 135
+        usado = round(reps * (trab_m + rec_m))
+        resto_z2 = max(10, cuerpo - usado)
         return [
-            {"tipo": "continuo", "etiqueta": "Calentamiento progresivo", "duracion_min": cal, "ftp_pct": 62, "cadencia": "90 rpm"},
-            {"tipo": "intervalos", "etiqueta": "Rønnestad 30/15s VO2max", "repeticiones": reps, "trabajo_min": 0.5, "trabajo_ftp_pct": 120, "trabajo_cadencia": "100 rpm", "recuperacion_min": 0.25, "recuperacion_ftp_pct": 50},
-            {"tipo": "continuo", "etiqueta": "Base aeróbica Z2", "duracion_min": resto_z2, "ftp_pct": 66, "cadencia": "90 rpm"},
+            {"tipo": "continuo", "etiqueta": "Calentamiento progresivo", "duracion_min": cal, "ftp_pct": 60, "cadencia": "90 rpm"},
+            {"tipo": "continuo", "etiqueta": "Base aeróbica Z2", "duracion_min": resto_z2, "ftp_pct": 68, "cadencia": "90-95 rpm"},
+            {"tipo": "intervalos", "etiqueta": "Activaciones Neuromusculares / Cadencia" if "sprint" in texto else "Rønnestad 30/15s VO2max", "repeticiones": reps, "trabajo_min": trab_m, "trabajo_ftp_pct": pct_t, "trabajo_cadencia": "105-110 rpm", "recuperacion_min": rec_m, "recuperacion_ftp_pct": 55},
             {"tipo": "continuo", "etiqueta": "Enfriamiento Z1", "duracion_min": max(5, dur - (cal + usado + resto_z2)), "ftp_pct": 50, "cadencia": "85 rpm"},
+        ]
+
+    if any(k in texto for k in ["cadencia", "drill"]):
+        reps = 5 if cuerpo >= 50 else 4
+        usado = reps * 8
+        resto_z2 = max(10, cuerpo - usado)
+        return [
+            {"tipo": "continuo", "etiqueta": "Calentamiento progresivo", "duracion_min": cal, "ftp_pct": 58, "cadencia": "90 rpm"},
+            {"tipo": "intervalos", "etiqueta": "Drills Eficiencia Cadencia Alta", "repeticiones": reps, "trabajo_min": 5, "trabajo_ftp_pct": 72, "trabajo_cadencia": "100-105 rpm", "recuperacion_min": 3, "recuperacion_ftp_pct": 62},
+            {"tipo": "continuo", "etiqueta": "Rodaje Z2 aeróbico", "duracion_min": resto_z2, "ftp_pct": 68, "cadencia": "90 rpm"},
+            {"tipo": "continuo", "etiqueta": "Enfriamiento suave", "duracion_min": max(5, dur - (cal + usado + resto_z2)), "ftp_pct": 50, "cadencia": "85 rpm"},
         ]
 
     if any(k in texto for k in ["vo2", "hiit", "seiler", "series"]):
@@ -373,24 +387,33 @@ def generar_estructura_respaldo(tipo_sesion: str, duracion_total: int):
         bloques.append({"tipo": "continuo", "etiqueta": "Enfriamiento Z1", "duracion_min": max(5, dur - (cal + usado + (resto_z2 if resto_z2 >= 5 else 0))), "ftp_pct": 50, "cadencia": "85 rpm"})
         return bloques
 
-    if any(k in texto for k in ["sweet", "ss", "umbral", "ftp", "fuerza", "torque", "tempo"]):
+    if any(k in texto for k in ["sweet", "ss", "umbral", "ftp", "fuerza", "torque", "tempo", "progresivo", "surge", "z3"]):
         es_torque = "fuerza" in texto or "torque" in texto or "baja cadencia" in texto
-        pct_trab = 86 if es_torque else 92
+        pct_trab = 85 if es_torque else (83 if "z3" in texto or "progresivo" in texto else 91)
         cad_trab = "60-65 rpm" if es_torque else "88-92 rpm"
-        reps = 3 if cuerpo >= 45 else 2
-        trab_min = min(15, max(8, (cuerpo // reps) - 5))
+        reps = 4 if es_torque else (3 if cuerpo >= 50 else 2)
+        trab_min = 8 if es_torque else min(16, max(10, (cuerpo // reps) - 5))
         rec_min = 4
         usado = reps * (trab_min + rec_min)
         resto_z2 = max(0, cuerpo - usado)
         bloques = [
-            {"tipo": "continuo", "etiqueta": "Calentamiento progresivo", "duracion_min": cal, "ftp_pct": 62, "cadencia": "90 rpm"},
-            {"tipo": "intervalos", "etiqueta": "Fuerza-Resistencia Torque" if es_torque else "Sweet Spot / Umbral", "repeticiones": reps, "trabajo_min": trab_min, "trabajo_ftp_pct": pct_trab, "trabajo_cadencia": cad_trab, "recuperacion_min": rec_min, "recuperacion_ftp_pct": 55},
+            {"tipo": "continuo", "etiqueta": "Calentamiento progresivo", "duracion_min": cal, "ftp_pct": 60, "cadencia": "90 rpm"},
         ]
-        if resto_z2 >= 10:
-            bloques.append({"tipo": "continuo", "etiqueta": "Resistencia aeróbica Z2", "duracion_min": resto_z2, "ftp_pct": 68, "cadencia": "90 rpm"})
+        if resto_z2 >= 15:
+            bloques.append({"tipo": "continuo", "etiqueta": "Base aeróbica Z2", "duracion_min": resto_z2, "ftp_pct": 68, "cadencia": "90 rpm"})
             enf_real = dur - (cal + usado + resto_z2)
         else:
             enf_real = dur - (cal + usado)
+        bloques.append({
+            "tipo": "intervalos",
+            "etiqueta": "Fuerza-Resistencia Torque" if es_torque else ("Bloques Tempo Z3" if pct_trab < 88 else "Sweet Spot Progresivo"),
+            "repeticiones": reps,
+            "trabajo_min": trab_min,
+            "trabajo_ftp_pct": pct_trab,
+            "trabajo_cadencia": cad_trab,
+            "recuperacion_min": rec_min,
+            "recuperacion_ftp_pct": 55,
+        })
         bloques.append({"tipo": "continuo", "etiqueta": "Enfriamiento suave", "duracion_min": max(5, enf_real), "ftp_pct": 50, "cadencia": "85 rpm"})
         return bloques
 
@@ -409,7 +432,6 @@ def generar_estructura_respaldo(tipo_sesion: str, duracion_total: int):
 
 
 def normalizar_estructura(bloques, duracion_total, tipo_sesion=""):
-    """Valida y normaliza los bloques de la IA y cuadra siempre su duración exacta con duracion_total."""
     dur_total_int = int(duracion_total or 0)
     if dur_total_int <= 0:
         return None
@@ -428,9 +450,9 @@ def normalizar_estructura(bloques, duracion_total, tipo_sesion=""):
                 "tipo": "intervalos",
                 "etiqueta": etiqueta,
                 "repeticiones": int(_num(b.get("repeticiones") or b.get("reps"), 2, 1, 60)),
-                "trabajo_min": round(_num(b.get("trabajo_min") or b.get("workMin"), 5, 0.1, 240), 2),
-                "trabajo_ftp_pct": round(_num(b.get("trabajo_ftp_pct") or b.get("workPct"), 92, 30, 400)),
-                "trabajo_cadencia": str(b.get("trabajo_cadencia") or b.get("workCadence") or "90 rpm")[:20],
+                "trabajo_min": round(_num(b.get("trabajo_min") or b.get("workMin") or b.get("duracion_min"), 5, 0.1, 240), 2),
+                "trabajo_ftp_pct": round(_num(b.get("trabajo_ftp_pct") or b.get("workPct") or b.get("ftp_pct"), 90, 30, 400)),
+                "trabajo_cadencia": str(b.get("trabajo_cadencia") or b.get("cadencia") or "90 rpm")[:20],
                 "recuperacion_min": round(_num(b.get("recuperacion_min") or b.get("restMin"), 3, 0, 120), 2),
                 "recuperacion_ftp_pct": round(_num(b.get("recuperacion_ftp_pct") or b.get("restPct"), 55, 30, 150)),
             })
@@ -438,9 +460,9 @@ def normalizar_estructura(bloques, duracion_total, tipo_sesion=""):
             limpios.append({
                 "tipo": "continuo",
                 "etiqueta": etiqueta,
-                "duracion_min": round(_num(b.get("duracion_min") or b.get("durationMin"), 15, 1, 600)),
-                "ftp_pct": round(_num(b.get("ftp_pct") or b.get("ftpPct"), 68, 30, 400)),
-                "cadencia": str(b.get("cadencia") or b.get("cadence") or "90 rpm")[:20],
+                "duracion_min": round(_num(b.get("duracion_min") or b.get("durationMin") or b.get("trabajo_min"), 15, 1, 600)),
+                "ftp_pct": round(_num(b.get("ftp_pct") or b.get("ftpPct") or b.get("trabajo_ftp_pct"), 68, 30, 400)),
+                "cadencia": str(b.get("cadencia") or b.get("trabajo_cadencia") or "90 rpm")[:20],
             })
 
     if not limpios:
@@ -488,7 +510,6 @@ def cargar_estructura(texto):
 
 
 def estructura_a_texto_intervals(estructura):
-    """Convierte los bloques al formato estricto de entrenamientos de Intervals.icu."""
     def cadencia(valor):
         limpio = str(valor or "").lower().replace("rpm", "").replace(" ", "").strip()
         return f" {limpio}rpm" if limpio else ""
@@ -515,8 +536,8 @@ def estructura_a_texto_intervals(estructura):
 
 
 def extraer_sesiones_de_json_truncado(error_str: str):
-    """Si Groq corta un JSON muy largo en failed_generation, rescata todas las sesiones completas antes del corte."""
-    if "failed_generation" not in error_str:
+    """Rescata todas las sesiones del intento de llamada a herramienta cuando Groq devuelve 400 tool_use_failed."""
+    if "failed_generation" not in error_str and '"sesiones"' not in error_str:
         return None
     objetos_sesion = []
     partes = error_str.split('"fecha"')
@@ -542,6 +563,43 @@ def extraer_sesiones_de_json_truncado(error_str: str):
                 "nota_entrenador": m_nota.group(1) if m_nota else "Sesión estructurada para el bloque activo."
             })
     return objetos_sesion if objetos_sesion else None
+
+
+def formatear_respuesta_semanal_markdown(guardado: list, ftp: int) -> str:
+    """Genera una respuesta Markdown completa y exacta a partir de los entrenamientos guardados en BD."""
+    filas = []
+    desglose = []
+    for s in guardado:
+        dia_cap = s["dia"].capitalize()
+        dur_h = f"{s['duracion_min'] // 60}h {s['duracion_min'] % 60:02d}m" if s["duracion_min"] >= 60 else f"{s['duracion_min']}m"
+        filas.append(f"| **{dia_cap}** ({s['fecha'][5:]}) | {s['entorno']} | {dur_h} | {s['sesion']} | {s['tss']} |")
+
+        pasos_txt = []
+        for b in s.get("bloques", []):
+            if b.get("tipo") == "intervalos":
+                w_trab = round(ftp * (b["trabajo_ftp_pct"] / 100.0))
+                w_rec = round(ftp * (b["recuperacion_ftp_pct"] / 100.0))
+                pasos_txt.append(
+                    f"{b['repeticiones']}x {b['trabajo_min']}m a ~{w_trab}W ({b['trabajo_ftp_pct']}% FTP, {b.get('trabajo_cadencia', '90 rpm')}) / rec {b['recuperacion_min']}m a {w_rec}W"
+                )
+            else:
+                w_cont = round(ftp * (b["ftp_pct"] / 100.0))
+                pasos_txt.append(f"{b['etiqueta']}: {b['duracion_min']}m a ~{w_cont}W ({b['ftp_pct']}% FTP, {b.get('cadencia', '90 rpm')})")
+        detalle_bloques = " → ".join(pasos_txt) if pasos_txt else "Descanso pasivo y supercompensación."
+        desglose.append(f"* **{dia_cap} — {s['sesion']} ({s['tss']} TSS):** {detalle_bloques}")
+
+    tabla = (
+        "### 🗓 Planificación Semanal\n\n"
+        "| Día | Entorno | Duración | Sesión | TSS |\n"
+        "| :--- | :--- | :--- | :--- | :--- |\n"
+        + "\n".join(filas)
+        + "\n\n### 🔬 Análisis Fisiológico y Ejecución (FTP " + f"{ftp}W)\n\n"
+        + "\n".join(desglose)
+        + "\n\n### 💡 Pro-Tips del Coach\n"
+        "* **Nutrición intra-entreno:** En sesiones de 90-120 min apunta a **60 g CHO/h**; en tiradas de 3h sube a **80-90 g CHO/h** (ratio glucosa:fructosa 1:0.8).\n"
+        "* **Control de deriva cardíaca:** Mantén una cadencia fluida (90-95 rpm en Z2 y 60-65 rpm en bloques específicos de fuerza/torque) vigilando que el pulso no derive más de un 5%."
+    )
+    return tabla
 
 
 @app.get("/")
@@ -641,7 +699,6 @@ async def sync_activities(db: Session = Depends(get_db)):
 
 @app.post("/api/disponibilidad")
 def guardar_disponibilidad_semanal(payload: DisponibilidadPayload, db: Session = Depends(get_db)):
-    """Guarda en PostgreSQL las horas máximas disponibles por día de la semana (L a D)."""
     orden = ["L", "M", "X", "J", "V", "S", "D"]
     partes = []
     total_h = 0.0
@@ -650,7 +707,7 @@ def guardar_disponibilidad_semanal(payload: DisponibilidadPayload, db: Session =
         total_h += h
         h_str = f"{int(h)}h" if h.is_integer() else f"{h}h"
         partes.append(f"{d}={h_str}")
-    resumen_disp = f"{', '.join(partes)} (Total máx: {round(total_h, 1)}h/sem)"
+    resumen_disp = f"{', '.join(partes)} (Máx: {round(total_h, 1)}h/sem)"
 
     usuario = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
     if usuario:
@@ -669,7 +726,6 @@ def guardar_disponibilidad_semanal(payload: DisponibilidadPayload, db: Session =
 
 @app.post("/api/objetivos")
 def crear_o_actualizar_objetivo(payload: NuevoObjetivoPayload, db: Session = Depends(get_db)):
-    """Permite añadir objetivos principales (A), secundarios (B) o preparatorios (C) desde la app."""
     try:
         fecha_dt = datetime.strptime(payload.fecha_meta.strip(), "%Y-%m-%d").date()
         prio = (payload.prioridad or "B").upper()[:1]
@@ -706,7 +762,6 @@ def eliminar_objetivo(objetivo_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/checkin")
 def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depends(get_db)):
-    """Adapta al instante el entrenamiento de hoy según la disponibilidad real del día y la fatiga muscular."""
     try:
         fecha_obj = (
             datetime.strptime(payload.fecha.strip(), "%Y-%m-%d").date()
@@ -772,7 +827,7 @@ def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depen
             estructura = generar_estructura_respaldo(tipo_nuevo, min_disp)
             sesion_db.estructura = json.dumps(estructura, ensure_ascii=False)
             sesion_db.motivo_adaptacion = (
-                f"Check-in diario (piernas frescas, {min_disp} min disponibles en {entorno}): Estímulo de calidad optimizado para aprovechar tu ventana de alta disponibilidad fisiológica."
+                f"Check-in diario (piernas frescas, {min_disp} min en {entorno}): Estímulo de calidad optimizado para aprovechar tu ventana fisiológica."
             )
         else:
             nombre_base = sesion_db.tipo_sesion or "Base Aeróbica Z2 + Tempo"
@@ -785,7 +840,7 @@ def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depen
             estructura = normalizar_estructura(cargar_estructura(sesion_db.estructura), min_disp, sesion_db.tipo_sesion)
             sesion_db.estructura = json.dumps(estructura, ensure_ascii=False) if estructura else None
             sesion_db.motivo_adaptacion = (
-                f"Check-in diario: Duración reajustada exactamente a tus {min_disp} min disponibles hoy en {entorno} manteniendo el estímulo del bloque activo."
+                f"Check-in diario: Duración reajustada exactamente a tus {min_disp} min disponibles hoy en {entorno}."
             )
 
         db.commit()
@@ -819,7 +874,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         acts_ano = db.query(models.Activity).filter(
             models.Activity.usuario_id == 1,
             models.Activity.start_date_local >= hace_un_ano
-        ).order_by(models.Activity.start_date_local.desc()).all()
+        ).all()
 
         horas_ultimo_ano = round(sum((a.moving_time or 0) for a in acts_ano) / 3600, 1)
         desnivel_ultimo_ano = int(sum((a.total_elevation_gain or 0) for a in acts_ano))
@@ -833,20 +888,6 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
 
         acts_recientes = [a for a in acts_ano if a.start_date_local and a.start_date_local >= hace_4_semanas]
         media_horas_ultimas_4_sem = round(sum((a.moving_time or 0) for a in acts_recientes) / 3600 / 4, 1)
-
-        # Últimas 5 salidas reales en bici para que el Coach pueda analizarlas si el usuario pregunta
-        ultimas_5_salidas = []
-        for a in acts_ano[:5]:
-            fecha_a = a.start_date_local.strftime("%Y-%m-%d") if a.start_date_local else "N/A"
-            dur_m = round((a.moving_time or 0) / 60)
-            km_a = round((a.distance or 0) / 1000, 1)
-            desn_a = int(a.total_elevation_gain or 0)
-            np_a = int(a.normalized_power or 0)
-            tss_a = int(a.tss or 0)
-            ultimas_5_salidas.append(
-                f"{fecha_a} '{a.name}': {dur_m}m, {km_a}km, +{desn_a}m, NP {np_a}W, {tss_a} TSS"
-            )
-        txt_ultimas_salidas = " | ".join(ultimas_5_salidas) if ultimas_5_salidas else "Sin salidas recientes sincronizadas."
 
         objetivos_activos = db.query(models.Objetivo).filter(
             models.Objetivo.usuario_id == 1,
@@ -1044,20 +1085,19 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "objetivo": {"type": "string", "description": "Nombre del objetivo elegido por el usuario."},
-                            "fecha_meta": {"type": "string", "description": "Fecha en formato YYYY-MM-DD."},
-                            "prioridad": {"type": "string", "enum": ["A", "B", "C"], "description": "A=Principal, B=Secundario, C=Preparatorio."},
-                            "disponibilidad_semanal": {"type": "string", "description": "Disponibilidad del usuario por días (ej. 'L-J=2h, V=0h, S-D=6h')."},
-                            "resumen_estrategico": {"type": "string", "description": "Diagnóstico de 2 párrafos citando métricas históricas reales y la estrategia."},
+                            "objetivo": {"type": "string"},
+                            "fecha_meta": {"type": "string", "description": "YYYY-MM-DD"},
+                            "prioridad": {"type": "string", "enum": ["A", "B", "C"]},
+                            "disponibilidad_semanal": {"type": "string"},
+                            "resumen_estrategico": {"type": "string"},
                             "bloques": {
                                 "type": "array",
-                                "description": "Entre 4 y 7 bloques cronológicos desde hoy hasta fecha_meta.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
                                         "nombre": {"type": "string"},
-                                        "fecha_inicio": {"type": "string", "description": "YYYY-MM-DD"},
-                                        "fecha_fin": {"type": "string", "description": "YYYY-MM-DD"},
+                                        "fecha_inicio": {"type": "string"},
+                                        "fecha_fin": {"type": "string"},
                                         "descripcion": {"type": "string"},
                                         "foco_fisiologico": {"type": "string"}
                                     },
@@ -1077,21 +1117,21 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "disponibilidad_semanal": {"type": "string", "description": "Si el usuario indicó horas disponibles, guárdalas aquí."},
+                            "disponibilidad_semanal": {"type": "string"},
                             "sesiones": {
                                 "type": "array",
                                 "items": {
                                     "type": "object",
                                     "properties": {
                                         "fecha": {"type": "string", "description": "YYYY-MM-DD"},
-                                        "tipo_sesion": {"type": "string"},
+                                        "tipo_sesion": {"type": "string", "description": "Título descriptivo (ej. 'Sweet Spot Progresivo + Z2', 'Z2 + Cadencia Drills', 'Z2 + Torque 65rpm')."},
                                         "entorno": {"type": "string", "description": "'Indoor' o 'Outdoor'"},
                                         "duracion_minutos": {"type": "integer"},
                                         "tss": {"type": "integer"},
                                         "nota_entrenador": {"type": "string"},
                                         "bloques": {
                                             "type": "array",
-                                            "description": "MÁXIMO 3 o 4 bloques por sesión (1. Calentamiento, 2. Parte principal agrupando series con 'repeticiones', 3. Bloque extra opcional, 4. Enfriamiento). PROHIBIDO duplicar bloques de 1 repetición.",
+                                            "description": "Opcional: Máximo 3 bloques por sesión.",
                                             "items": {
                                                 "type": "object",
                                                 "properties": {
@@ -1111,7 +1151,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                                             }
                                         }
                                     },
-                                    "required": ["fecha", "tipo_sesion", "duracion_minutos"]
+                                    "required": ["fecha", "tipo_sesion", "duracion_minutos", "tss", "nota_entrenador"]
                                 }
                             }
                         },
@@ -1125,84 +1165,58 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         fechas_validas = [hoy_dt + timedelta(days=i) for i in range(dias_hasta_domingo + 1)]
         fechas_validas_str = ", ".join(f"{d.strftime('%Y-%m-%d')} ({nombre_dia(d)})" for d in fechas_validas)
 
-        if objetivos_activos:
-            txt_objetivos = " | ".join(
-                f"[Prioridad {o.prioridad}] {o.nombre} ({o.fecha_meta})" for o in objetivos_activos
-            )
-        else:
-            txt_objetivos = "Ninguno configurado aún."
-
-        if fase_activa_hoy:
-            txt_bloque_hoy = (
-                f"Bloque activo hoy: '{fase_activa_hoy.nombre}' ({fase_activa_hoy.fecha_inicio} a {fase_activa_hoy.fecha_fin}) "
-                f"- Foco: {fase_activa_hoy.foco_fisiologico or fase_activa_hoy.descripcion}"
-            )
-        else:
-            txt_bloque_hoy = "Sin bloques de macrociclo activos aún."
-
-        if sesiones_proximas:
-            txt_sesiones_bd = "; ".join(
-                f"{s.fecha_programada} ({nombre_dia(s.fecha_programada)}): {s.tipo_sesion} ({s.duracion_minutos_planeada}m, {s.tss_planeado} TSS, {s.estado})"
-                for s in sesiones_proximas
-            )
-        else:
-            txt_sesiones_bd = "Ninguna sesión programada para esta semana."
-
-        wellness_extra = ""
-        if telemetria.get("hrv") or telemetria.get("sleep_hours") or telemetria.get("resting_hr"):
-            wellness_extra = (
-                f"- Wellness hoy (Intervals.icu): HRV={telemetria.get('hrv') or 'N/A'} ms | "
-                f"FC Reposo={telemetria.get('resting_hr') or 'N/A'} bpm | Sueño={telemetria.get('sleep_hours') or 'N/A'} h.\n"
-            )
+        txt_objetivos = (
+            " | ".join(f"[Prioridad {o.prioridad}] {o.nombre} ({o.fecha_meta})" for o in objetivos_activos)
+            if objetivos_activos else "Ninguno configurado aún."
+        )
+        txt_bloque_hoy = (
+            f"Bloque activo hoy: '{fase_activa_hoy.nombre}' ({fase_activa_hoy.fecha_inicio} a {fase_activa_hoy.fecha_fin}) - Foco: {fase_activa_hoy.foco_fisiologico or fase_activa_hoy.descripcion}"
+            if fase_activa_hoy else "Sin bloques de macrociclo activos aún."
+        )
+        txt_sesiones_bd = (
+            "; ".join(f"{s.fecha_programada} ({nombre_dia(s.fecha_programada)}): {s.tipo_sesion} ({s.duracion_minutos_planeada}m, {s.tss_planeado} TSS, {s.estado})" for s in sesiones_proximas)
+            if sesiones_proximas else "Ninguna sesión programada para esta semana."
+        )
 
         system_prompt = (
             f"Hoy es {nombre_dia(hoy_dt)} {hoy_dt.strftime('%Y-%m-%d')}.\n"
             "Eres el Director Deportivo y Fisiólogo Jefe de Diego Allue. Diseñas entrenamientos basados en evidencia científica moderna (Seiler, Rønnestad, Issurin, San Millán, Jeukendrup) y en sus datos reales de Intervals.icu.\n\n"
-            "📊 TELEMETRÍA EN VIVO Y NIVELES DE PROGRESIÓN (1.0 a 10.0):\n"
+            "📊 TELEMETRÍA EN VIVO Y NIVELES DE PROGRESIÓN:\n"
             f"- FTP actual: {ftp_actual}W | Peso: {peso_actual} kg ({wkg_actual} W/kg) | LTHR: {lthr_actual} bpm | FC Máx: {telemetria['max_hr']} bpm.\n"
             f"- Carga actual: Fitness (CTL) {ctl_actual} | Fatiga (ATL) {atl_actual} | Frescura (TSB) {tsb_actual}.\n"
-            f"{wellness_extra}"
-            f"- Niveles de Progresión del Atleta: Resistencia Z2={niveles['resistencia_z2']}/10 | Torque/Fuerza={niveles['tempo_torque']}/10 | Sweet Spot={niveles['sweet_spot']}/10 | Umbral FTP={niveles['umbral_ftp']}/10 | VO2max={niveles['vo2max']}/10 | Durabilidad={niveles['durabilidad_kj']}/10.\n"
-            f"- Últimos 365 días: {horas_ultimo_ano} h y {desnivel_ultimo_ano:,} m desnivel | Salida récord: {salida_mas_larga_h} h ({salida_mas_larga_desnivel:,} m) | Últimas 4 sem: {media_horas_ultimas_4_sem} h/sem.\n"
-            f"- Últimas 5 salidas realizadas en bici: {txt_ultimas_salidas}\n\n"
-            "🧠 MEMORIA PERSISTENTE EN BASE DE DATOS:\n"
-            f"- Objetivos de la temporada: {txt_objetivos}\n"
-            f"- Disponibilidad semanal guardada: {disponibilidad_guardada}\n"
+            f"- Niveles de Progresión: Z2={niveles['resistencia_z2']}/10 | Torque={niveles['tempo_torque']}/10 | Sweet Spot={niveles['sweet_spot']}/10 | FTP={niveles['umbral_ftp']}/10 | VO2max={niveles['vo2max']}/10 | Durabilidad={niveles['durabilidad_kj']}/10.\n"
+            f"- Últimos 365 días: {horas_ultimo_ano} h y {desnivel_ultimo_ano:,} m desnivel | Salida récord: {salida_mas_larga_h} h ({salida_mas_larga_desnivel:,} m) | Últimas 4 sem: {media_horas_ultimas_4_sem} h/sem.\n\n"
+            "🧠 MEMORIA EN BASE DE DATOS:\n"
+            f"- Objetivos: {txt_objetivos}\n"
+            f"- Disponibilidad semanal: {disponibilidad_guardada}\n"
             f"- {txt_bloque_hoy}\n"
-            f"- Agenda actual en BD: {txt_sesiones_bd}\n\n"
-            "🔬 PROTOCOLOS CIENTÍFICOS DE PRESCRIPCIÓN:\n"
-            "- Si el volumen semanal disponible es <8h, aplica distribución Piramidal/Sweet Spot; si es >10h, prioriza distribución Polarizada 80/20 (Seiler).\n"
-            "- Usa protocolos probados: Seiler 4x8m al 106-108% FTP (rec 4m), Rønnestad 30/15s al 120%/50% FTP, Torque específico en subida a 60-65 rpm (85-88% FTP), FatMax/Z2 constante (65-72% FTP a 90-95 rpm) y Durabilidad en fatiga (bloques de Sweet Spot/Umbral en la última hora tras >1.800 kJ de Z2).\n"
-            "- Si hay un objetivo secundario (Prioridad B) en la semana actual, aplica un mini-taper de 3 días previos con activaciones neuromusculares.\n\n"
+            f"- Agenda actual: {txt_sesiones_bd}\n\n"
             "REGLAS DE EJECUCIÓN:\n"
-            "1. MACROCICLO Y MULTI-OBJETIVO: Si pide estructurar el macrociclo y aún no tienes fecha meta o disponibilidad, haz 3 preguntas breves. Si ya las tienes, llama a 'estructurar_macrociclo'.\n"
-            f"2. PLANIFICACIÓN SEMANAL: Para programar esta semana, las fechas válidas desde hoy hasta el domingo son: [{fechas_validas_str}]. Respeta la disponibilidad diaria como TOPE (días con 0h = 'Descanso', duracion_minutos=0).\n"
-            "3. REGLA CRÍTICA PARA 'bloques' EN 'actualizar_calendario': Incluye SIEMPRE entre 2 y 4 bloques por sesión agrupando series con 'repeticiones': N.\n"
-            "4. FORMATO DE RESPUESTA AL PROGRAMAR SEMANA: Después de llamar a 'actualizar_calendario', responde SIEMPRE al usuario con:\n"
-            "### 🗓 Planificación Semanal\n"
-            "(Tabla Markdown: Día | Entorno | Duración | Sesión | TSS | Enfoque del Bloque)\n\n"
-            "### 🔬 Análisis Fisiológico y Ejecución\n"
-            f"(Desglose por día con los bloques exactos y RANGOS de vatios calculados sobre su FTP de {ftp_actual}W).\n\n"
-            "### 💡 Pro-Tips del Coach\n"
-            "(2 o 3 consejos científicos de nutrición CHO g/h, sodio o cadencia)."
+            f"1. Para programar esta semana, usa las fechas desde hoy hasta el domingo: [{fechas_validas_str}].\n"
+            "2. En 'actualizar_calendario', para que el JSON sea ligero y NUNCA supere el límite de tokens, pon como máximo 3 elementos en 'bloques' por sesión (Calentamiento, Bloque Principal agrupando con 'repeticiones', Enfriamiento) u omite 'bloques' y deja que el motor fisiológico lo construya a partir de 'tipo_sesion' y 'duracion_minutos'.\n"
+            "3. Tras llamar a 'actualizar_calendario', presenta SIEMPRE:\n"
+            "### 🗓 Planificación Semanal\n(Tabla Markdown)\n"
+            f"### 🔬 Análisis Fisiológico y Ejecución (FTP {ftp_actual}W)\n"
+            "### 💡 Pro-Tips del Coach"
         )
 
         mensajes = [{"role": "system", "content": system_prompt}]
         if mensaje.historial:
             for msg in mensaje.historial[-4:]:
                 role = "assistant" if msg.rol == "ia" else "user"
-                texto_recortado = msg.texto[:700] + "..." if len(msg.texto) > 700 else msg.texto
+                texto_recortado = msg.texto[:600] + "..." if len(msg.texto) > 600 else msg.texto
                 mensajes.append({"role": role, "content": texto_recortado})
         mensajes.append({"role": "user", "content": mensaje.texto})
 
         herramienta_ejecutada = False
+        ultimo_guardado = None
 
         for _ in range(2):
             try:
                 kwargs_groq = {
-                    "model": "openai/gpt-oss-120b",
+                    "model": "openai/gpt-oss-120b" if not herramienta_ejecutada else "openai/gpt-oss-20b",
                     "messages": mensajes,
-                    "max_tokens": 2200,
+                    "max_tokens": 1800,
                 }
                 if not herramienta_ejecutada:
                     kwargs_groq["tools"] = tools
@@ -1214,20 +1228,14 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 sesiones_rescatadas = extraer_sesiones_de_json_truncado(err_str)
                 if sesiones_rescatadas:
                     res_emergencia = actualizar_calendario(sesiones=sesiones_rescatadas)
-                    mensajes.append({
-                        "role": "system",
-                        "content": (
-                            f"Las sesiones ya se han guardado automáticamente en la BD: {json.dumps(res_emergencia['guardado'], ensure_ascii=False)}. "
-                            "Redacta ahora directamente la respuesta completa para el usuario con la Tabla Markdown (### 🗓 Planificación Semanal), "
-                            "el ### 🔬 Análisis Fisiológico y Ejecución y los ### 💡 Pro-Tips del Coach."
+                    return {
+                        "respuesta": formatear_respuesta_semanal_markdown(
+                            res_emergencia.get("guardado", []),
+                            ftp_actual
                         )
-                    })
-                    resp_final = client.chat.completions.create(
-                        model="openai/gpt-oss-120b",
-                        messages=mensajes,
-                        max_tokens=2000
-                    )
-                    return {"respuesta": resp_final.choices[0].message.content}
+                    }
+                if ultimo_guardado:
+                    return {"respuesta": formatear_respuesta_semanal_markdown(ultimo_guardado, ftp_actual)}
                 raise err_groq
 
             msg_ia = respuesta_ia.choices[0].message
@@ -1257,6 +1265,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                         disponibilidad_semanal=args.get("disponibilidad_semanal"),
                         sesiones=args.get("sesiones", [])
                     )
+                    ultimo_guardado = resultado.get("guardado")
                 else:
                     resultado = {"aviso": "Consulta leída de memoria."}
 
@@ -1268,6 +1277,8 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 })
                 herramienta_ejecutada = True
 
+        if ultimo_guardado:
+            return {"respuesta": formatear_respuesta_semanal_markdown(ultimo_guardado, ftp_actual)}
         return {"respuesta": "He actualizado tu estructura de entrenamiento en la Agenda."}
     except Exception as e:
         return {"error_interno": f"Fallo en la matriz: {str(e)}"}
@@ -1347,27 +1358,7 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
         if not estructura and sesion.duracion_minutos_planeada > 0:
             estructura = generar_estructura_respaldo(sesion.tipo_sesion, sesion.duracion_minutos_planeada)
 
-        if estructura:
-            workout_text = estructura_a_texto_intervals(estructura)
-        else:
-            prompt = f"""
-            Convierte esta sesión en formato de texto estricto para Intervals.icu.
-            Sesión: '{sesion.tipo_sesion}' ({sesion.duracion_minutos_planeada} min)
-            Reglas:
-            - Usa 'm' para minutos y '%' para porcentaje de FTP.
-            - Ejemplo: "4x 4m 105%, 4m 50%"
-            Devuelve ÚNICAMENTE las líneas de los intervalos. Nada de saludos ni comillas.
-            """
-            respuesta_ia = client.chat.completions.create(
-                model="openai/gpt-oss-20b",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=500
-            )
-            workout_text = respuesta_ia.choices[0].message.content.strip()
-            if workout_text.startswith("```"):
-                lineas = workout_text.split("\n")
-                workout_text = "\n".join(lineas[1:-1]).strip()
-
+        workout_text = estructura_a_texto_intervals(estructura) if estructura else "60m 68%"
         obj = db.query(models.Objetivo).filter(models.Objetivo.id == sesion.objetivo_id).first()
         nombre_objetivo = obj.nombre if obj else "tu objetivo"
 
@@ -1388,9 +1379,7 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
 
         if response.status_code == 200:
             return {"status": "success"}
-        else:
-            return {"error": f"Error {response.status_code}: {response.text}"}
-
+        return {"error": f"Error {response.status_code}: {response.text}"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -1406,15 +1395,7 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
         if not estructura and sesion.duracion_minutos_planeada > 0:
             estructura = generar_estructura_respaldo(sesion.tipo_sesion, sesion.duracion_minutos_planeada)
 
-        if estructura:
-            workout_text = estructura_a_texto_intervals(estructura)
-        else:
-            prompt = f"Convierte esta sesión para Intervals. Sesión: '{sesion.tipo_sesion}'. Reglas: Usa 'm' y '%'. Devuelve ÚNICAMENTE las líneas."
-            respuesta_ia = client.chat.completions.create(model="openai/gpt-oss-20b", messages=[{"role": "user", "content": prompt}], max_tokens=500)
-            workout_text = respuesta_ia.choices[0].message.content.strip()
-            if workout_text.startswith("```"):
-                workout_text = "\n".join(workout_text.split("\n")[1:-1]).strip()
-
+        workout_text = estructura_a_texto_intervals(estructura) if estructura else "60m 68%"
         payload = {
             "start_date_local": f"{sesion.fecha_programada}T00:00:00",
             "type": "Ride",
@@ -1509,14 +1490,12 @@ def get_calendario(db: Session = Depends(get_db)):
         if not fase_activa_info and fases_formateadas:
             fase_activa_info = fases_formateadas[0]
 
-        # Mostrar sesiones desde el inicio de la semana actual (lunes) + próximos 14 días
         inicio_semana = hoy - timedelta(days=hoy.weekday())
         sesiones = db.query(models.EntrenamientoProgramado).filter(
             models.EntrenamientoProgramado.usuario_id == 1,
             models.EntrenamientoProgramado.fecha_programada >= inicio_semana
         ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(14).all()
 
-        # Actividades reales de los últimos 30 días desde PostgreSQL (sincronizadas con Intervals.icu)
         hace_30d = datetime.now() - timedelta(days=30)
         acts_recientes = db.query(models.Activity).filter(
             models.Activity.usuario_id == 1,
@@ -1555,11 +1534,9 @@ def get_calendario(db: Session = Depends(get_db)):
                 "kj": kj_act,
             }
             actividades_formateadas.append(item_act)
-            # Si hubo más de una actividad ese día, conservamos la de mayor carga (TSS/duración)
             if fecha_str not in mapa_actividades_por_fecha or dur_min > mapa_actividades_por_fecha[fecha_str]["duracion_min"]:
                 mapa_actividades_por_fecha[fecha_str] = item_act
 
-        # Algoritmo científico "REST OR TRAIN" (Readiness Score 0-100)
         ctl_v = telemetria["ctl"]
         atl_v = telemetria["atl"]
         tsb_v = telemetria["tsb"]
@@ -1590,15 +1567,15 @@ def get_calendario(db: Session = Depends(get_db)):
         if score >= 75:
             veredicto_rt = "TRAIN HARD"
             color_rt = "#10b981"
-            consejo_rt = f" Luz verde fisiológica ({score}%). TSB en {tsb_v} y ratio carga aguda/crónica en {acwr}. Día óptimo para completar series de alta intensidad o bloque clave."
+            consejo_rt = f"Luz verde ({score}%). TSB en {tsb_v} (ACWR {acwr}). Óptimo para completar las series clave."
         elif score >= 48:
             veredicto_rt = "TRAIN MODERATE"
             color_rt = "#f59e0b"
-            consejo_rt = f" Carga acumulada moderada ({score}%). TSB en {tsb_v} (ACWR {acwr}). Prioriza precisión aeróbica en Z2/Z3 evitando esfuerzos glucolíticos máximos."
+            consejo_rt = f"Carga moderada ({score}%). TSB en {tsb_v} (ACWR {acwr}). Prioriza precisión en Z2/Z3 sin picos máximos."
         else:
             veredicto_rt = "REST OR Z1"
             color_rt = "#f43f5e"
-            consejo_rt = f" Fatiga aguda alta ({score}%). TSB en {tsb_v} (ACWR {acwr}). Tu sistema nervioso necesita asimilar carga: descansa o convierte hoy a Z1 Regenerativo."
+            consejo_rt = f"Fatiga alta ({score}%). TSB en {tsb_v} (ACWR {acwr}). Convierte hoy a Z1 Regenerativo o descanso."
 
         nombre_obj = obj.nombre if obj else "Configura tu Objetivo"
         fecha_obj = obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else None
@@ -1608,11 +1585,20 @@ def get_calendario(db: Session = Depends(get_db)):
         )
 
         sesiones_salida = []
+        hubo_autopoblado = False
         for s in sesiones:
             f_str = s.fecha_programada.strftime("%Y-%m-%d")
             act_asociada = mapa_actividades_por_fecha.get(f_str)
             estado_final = "Completado" if (s.estado == "Completado" or act_asociada) else s.estado
             tss_real_final = getattr(s, "tss_real", None) or (act_asociada["tss"] if act_asociada else None)
+
+            est_cargada = cargar_estructura(getattr(s, "estructura", None))
+            if not est_cargada and (s.duracion_minutos_planeada or 0) > 0:
+                est_cargada = generar_estructura_respaldo(s.tipo_sesion, s.duracion_minutos_planeada)
+                if est_cargada:
+                    s.estructura = json.dumps(est_cargada, ensure_ascii=False)
+                    hubo_autopoblado = True
+
             sesiones_salida.append({
                 "id": s.id,
                 "fecha": f_str,
@@ -1623,9 +1609,12 @@ def get_calendario(db: Session = Depends(get_db)):
                 "tss_real": tss_real_final,
                 "estado": estado_final,
                 "nota": s.motivo_adaptacion,
-                "estructura": cargar_estructura(getattr(s, "estructura", None)),
+                "estructura": est_cargada,
                 "actividad_real": act_asociada
             })
+
+        if hubo_autopoblado:
+            db.commit()
 
         return {
             "telemetria": {

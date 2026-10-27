@@ -211,50 +211,53 @@ export default function RendimientoScreen() {
           ))}
         </View>
 
-        {/* GRÁFICA PMC */}
+        {/* GRÁFICA PMC AJUSTADA AL 100% DE LA TARJETA */}
         <View style={styles.chartCard}>
           <View style={styles.chartHeader}>
             <Text style={styles.cardTitle}>Curva de Gestión de Rendimiento (PMC)</Text>
             <View style={styles.legendRow}>
               <View style={styles.legendItem}>
                 <View style={[styles.legendDot, { backgroundColor: '#38bdf8' }]} />
-                <Text style={styles.legendText}>CTL</Text>
+                <Text style={styles.legendText}>CTL (Fitness)</Text>
               </View>
               <View style={styles.legendItem}>
                 <View style={[styles.legendDot, { backgroundColor: '#f43f5e' }]} />
-                <Text style={styles.legendText}>ATL</Text>
+                <Text style={styles.legendText}>ATL (Fatiga)</Text>
               </View>
             </View>
           </View>
 
           {stats?.grafica_ctl && stats.grafica_ctl.length > 0 ? (
-            <LineChart
-              data={stats.grafica_ctl}
-              data2={stats.grafica_atl}
-              height={190}
-              width={screenWidth - 88}
-              spacing={42}
-              initialSpacing={14}
-              color1="#38bdf8"
-              color2="#f43f5e"
-              textColor1="#94a3b8"
-              dataPointsColor1="#38bdf8"
-              dataPointsColor2="#f43f5e"
-              thickness={3}
-              hideRules
-              yAxisColor="#1e293b"
-              xAxisColor="#1e293b"
-              yAxisTextStyle={{ color: '#64748b', fontSize: 10 }}
-              xAxisLabelTextStyle={{ color: '#64748b', fontSize: 9 }}
-              curved
-              areaChart
-              startFillColor1="#38bdf8"
-              startOpacity1={0.22}
-              endOpacity1={0.0}
-              startFillColor2="#f43f5e"
-              startOpacity2={0.14}
-              endOpacity2={0.0}
-            />
+            <View style={{ overflow: 'hidden', alignItems: 'center' }}>
+              <LineChart
+                data={stats.grafica_ctl}
+                data2={stats.grafica_atl}
+                height={185}
+                width={screenWidth - 84}
+                spacing={Math.max(18, Math.floor((screenWidth - 105) / Math.max(1, stats.grafica_ctl.length)))}
+                initialSpacing={10}
+                endSpacing={10}
+                color1="#38bdf8"
+                color2="#f43f5e"
+                textColor1="#94a3b8"
+                dataPointsColor1="#38bdf8"
+                dataPointsColor2="#f43f5e"
+                thickness={2.5}
+                hideRules
+                yAxisColor="#1e293b"
+                xAxisColor="#1e293b"
+                yAxisTextStyle={{ color: '#64748b', fontSize: 10 }}
+                xAxisLabelTextStyle={{ color: '#64748b', fontSize: 8 }}
+                curved
+                areaChart
+                startFillColor1="#38bdf8"
+                startOpacity1={0.22}
+                endOpacity1={0.0}
+                startFillColor2="#f43f5e"
+                startOpacity2={0.14}
+                endOpacity2={0.0}
+              />
+            </View>
           ) : (
             <Text style={styles.noDataText}>Sincroniza con Intervals.icu para visualizar la curva PMC.</Text>
           )}
@@ -377,8 +380,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1e293b',
     marginBottom: 14,
+    overflow: 'hidden',
   },
-  chartHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
+  chartHeader: {
+    flexDirection: 'column',
+    gap: 6,
+    marginBottom: 12,
+  },
   cardTitle: { color: '#f8fafc', fontSize: 15, fontWeight: '800' },
   legendRow: { flexDirection: 'row', gap: 12 },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },

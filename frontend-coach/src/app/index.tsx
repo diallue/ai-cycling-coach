@@ -350,15 +350,14 @@ export default function ChatCoachScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#020617', paddingTop: 42 },
   header: {
-    backgroundColor: '#0f172a',
-    borderBottomWidth: 1,
-    borderColor: '#1e293b',
-    paddingLeft: 14,
-    paddingRight: 58, // Espacio libre para que el botón de engranaje nunca tape el texto
-    paddingVertical: 12,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    backgroundColor: '#0f172a',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderColor: '#1e293b',
+    gap: 12,
   },
   avatarCoach: {
     width: 38,
@@ -498,7 +497,8 @@ const styles = StyleSheet.create({
     padding: 12,
     alignSelf: 'flex-start',
   },
-  loadingBubbleText: { color: '#94a3b8', fontSize: 11, fontFamily: MONO_FONT },
+
+  loadingBubbleText: { flex: 1, color: '#94a3b8', fontSize: 12, fontFamily: MONO_FONT, lineHeight: 18 },
 
   inputBar: {
     backgroundColor: '#0f172a',
