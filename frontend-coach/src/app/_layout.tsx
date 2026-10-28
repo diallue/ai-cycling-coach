@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   Alert,
   Platform,
   KeyboardAvoidingView,
+  Linking,
 } from 'react-native';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -31,14 +32,17 @@ export default function AppLayout() {
   const [inicializando, setInicializando] = useState(true);
   const [usuario, setUsuario] = useState<UsuarioAuth | null>(getAuthUser());
 
-  // Estado formulario Login / Registro
+  // Estado OAuth2 Intervals.icu
+  const [esperandoOAuth, setEsperandoOAuth] = useState(false);
+  const pollTimerRef = useRef<any>(null);
+
+  // Acceso directo / manual de respaldo
+  const [mostrarManual, setMostrarManual] = useState(false);
   const [modoRegistro, setModoRegistro] = useState(false);
   const [cargandoAuth, setCargandoAuth] = useState(false);
   const [email, setEmail] = useState('diego@allue.com');
   const [password, setPassword] = useState('');
   const [nombre, setNombre] = useState('');
-  const [ftp, setFtp] = useState('280');
-  const [peso, setPeso] = useState('70');
   const [athleteId, setAthleteId] = useState('');
   const [apiKey, setApiKey] = useState('');
 
@@ -47,29 +51,64 @@ export default function AppLayout() {
   const [editNombre, setEditNombre] = useState('');
   const [editFtp, setEditFtp] = useState('');
   const [editPeso, setEditPeso] = useState('');
-  const [editLthr, setEditLthr] = useState('');
-  const [editMaxHr, setEditMaxHr] = useState('');
-  const [editAthId, setEditAthId] = useState('');
-  const [editApiKey, setEditApiKey] = useState('');
 
   useEffect(() => {
     const desuscribir = suscribirAuth(() => {
       setUsuario(getAuthUser());
     });
     restaurarSesionLocal().finally(() => setInicializando(false));
-    return desuscribir;
+    return () => {
+      desuscribir();
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
   }, []);
 
-  const abrirModalPerfil = () => {
-    if (!usuario) return;
-    setEditNombre(usuario.nombre);
-    setEditFtp(String(usuario.ftp_actual || 250));
-    setEditPeso(String(usuario.peso_actual || 70));
-    setEditLthr(String(usuario.lthr || 175));
-    setEditMaxHr(String(usuario.max_hr || 195));
-    setEditAthId(usuario.intervals_athlete_id || '');
-    setEditApiKey('');
-    setPerfilModal(true);
+  const iniciarOAuthConIntervals = async () => {
+    try {
+      setCargandoAuth(true);
+      const res = await fetch(`${API_BASE_URL}/api/auth/intervals/login-url`);
+      const data = await res.json();
+
+      if (!data.oauth_configurado) {
+        Alert.alert(
+          'OAuth pendiente de Client ID',
+          'Añade INTERVALS_CLIENT_ID e INTERVALS_CLIENT_SECRET en el apartado Environment de Render, o entra con el acceso directo de abajo.',
+          [
+            { text: 'Abrir Intervals.icu', onPress: () => Linking.openURL('https://intervals.icu/oauth/apply') },
+            { text: 'Usar acceso con email', onPress: () => setMostrarManual(true) },
+          ]
+        );
+        return;
+      }
+
+      setEsperandoOAuth(true);
+      await Linking.openURL(data.authorize_url);
+
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      pollTimerRef.current = setInterval(async () => {
+        try {
+          const pollRes = await fetch(`${API_BASE_URL}/api/auth/intervals/poll/${data.state}`);
+          const pollData = await pollRes.json();
+          if (pollData.status === 'completed' && pollData.token && pollData.usuario) {
+            clearInterval(pollTimerRef.current);
+            setEsperandoOAuth(false);
+            await fetch(`${API_BASE_URL}/sync`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${pollData.token}` },
+            }).catch(() => {});
+            await guardarSesionLocal(pollData.token, pollData.usuario);
+          } else if (pollData.status === 'error') {
+            clearInterval(pollTimerRef.current);
+            setEsperandoOAuth(false);
+            Alert.alert('Autorización cancelada', pollData.detail || 'No se completó la vinculación.');
+          }
+        } catch {}
+      }, 2000);
+    } catch {
+      Alert.alert('Error', 'No se pudo conectar con el servidor.');
+    } finally {
+      setCargandoAuth(false);
+    }
   };
 
   const ejecutarLoginORegistro = async () => {
@@ -85,8 +124,6 @@ export default function AppLayout() {
             nombre: nombre.trim() || 'Ciclista',
             email: email.trim(),
             password: password.trim(),
-            ftp_actual: Number(ftp) || 250,
-            peso_actual: Number(peso) || 70.0,
             intervals_athlete_id: athleteId.trim() || null,
             intervals_api_key: apiKey.trim() || null,
           }
@@ -104,10 +141,18 @@ export default function AppLayout() {
       }
       await guardarSesionLocal(data.token, data.usuario);
     } catch {
-      Alert.alert('Error de conexión', 'No se pudo conectar con el servidor en Render.');
+      Alert.alert('Error de conexión', 'No se pudo conectar con el servidor.');
     } finally {
       setCargandoAuth(false);
     }
+  };
+
+  const abrirModalPerfil = () => {
+    if (!usuario) return;
+    setEditNombre(usuario.nombre);
+    setEditFtp(String(usuario.ftp_actual || 250));
+    setEditPeso(String(usuario.peso_actual || 70));
+    setPerfilModal(true);
   };
 
   const guardarCambiosPerfil = async () => {
@@ -120,17 +165,12 @@ export default function AppLayout() {
           nombre: editNombre,
           ftp_actual: Number(editFtp) || 250,
           peso_actual: Number(editPeso) || 70,
-          lthr: Number(editLthr) || 175,
-          max_hr: Number(editMaxHr) || 195,
-          intervals_athlete_id: editAthId,
-          intervals_api_key: editApiKey || null,
         }),
       });
       const data = await res.json();
       if (res.ok && data.usuario) {
         setUsuario(data.usuario);
         setPerfilModal(false);
-        Alert.alert('Perfil Actualizado ✅', 'Tus métricas y conexión con Intervals.icu se han actualizado.');
       }
     } catch {
       Alert.alert('Error', 'No se pudo actualizar el perfil.');
@@ -147,7 +187,7 @@ export default function AppLayout() {
     );
   }
 
-  // ==================== PANTALLA DE LOGIN / REGISTRO ====================
+  // ==================== PANTALLA DE ACCESO CON INTERVALS.ICU ====================
   if (!usuario) {
     return (
       <KeyboardAvoidingView
@@ -163,126 +203,143 @@ export default function AppLayout() {
               VELO<Text style={{ color: '#10b981' }}>COACH</Text> IA
             </Text>
             <Text style={styles.authSubtitle}>
-              Plataforma de entrenamiento inteligente adaptada a tu fisiología y a Intervals.icu
+              Conecta tu cuenta de Intervals.icu en un clic. Importaremos tu FTP, peso, historial y enviaremos tus sesiones al Garmin/Wahoo automáticamente.
             </Text>
 
-            <View style={styles.modeSwitchRow}>
-              <TouchableOpacity
-                style={[styles.modeBtn, !modoRegistro && styles.modeBtnActive]}
-                onPress={() => setModoRegistro(false)}
-              >
-                <Text style={[styles.modeBtnText, !modoRegistro && styles.modeBtnTextActive]}>
-                  Iniciar Sesión
+            {esperandoOAuth ? (
+              <View style={styles.oauthWaitingBox}>
+                <ActivityIndicator size="large" color="#38bdf8" />
+                <Text style={styles.oauthWaitingTitle}>Esperando autorización de Intervals.icu...</Text>
+                <Text style={styles.oauthWaitingSub}>
+                  Inicia sesión en la ventana del navegador y pulsa "Confirmar". Entrarás automáticamente al terminar.
                 </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modeBtn, modoRegistro && styles.modeBtnActive]}
-                onPress={() => setModoRegistro(true)}
-              >
-                <Text style={[styles.modeBtnText, modoRegistro && styles.modeBtnTextActive]}>
-                  Crear Cuenta
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            {modoRegistro && (
+                <TouchableOpacity
+                  style={styles.cancelOAuthBtn}
+                  onPress={() => {
+                    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+                    setEsperandoOAuth(false);
+                  }}
+                >
+                  <Text style={styles.cancelOAuthText}>Cancelar</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
               <>
-                <Text style={styles.inputLabel}>NOMBRE DEL CICLISTA</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Ej: Carlos Sastre"
-                  placeholderTextColor="#64748b"
-                  value={nombre}
-                  onChangeText={setNombre}
-                />
-              </>
-            )}
+                <TouchableOpacity
+                  style={styles.intervalsPrimaryBtn}
+                  onPress={iniciarOAuthConIntervals}
+                  disabled={cargandoAuth}
+                >
+                  <Ionicons name="flash" size={18} color="#020617" />
+                  <Text style={styles.intervalsPrimaryBtnText}>
+                    Iniciar sesión con Intervals.icu
+                  </Text>
+                </TouchableOpacity>
 
-            <Text style={styles.inputLabel}>EMAIL</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="tu@email.com"
-              placeholderTextColor="#64748b"
-              autoCapitalize="none"
-              keyboardType="email-address"
-              value={email}
-              onChangeText={setEmail}
-            />
-
-            <Text style={styles.inputLabel}>CONTRASEÑA</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="••••••••"
-              placeholderTextColor="#64748b"
-              secureTextEntry
-              value={password}
-              onChangeText={setPassword}
-            />
-
-            {modoRegistro && (
-              <>
-                <View style={{ flexDirection: 'row', gap: 10 }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.inputLabel}>FTP ACTUAL (W)</Text>
-                    <TextInput
-                      style={styles.input}
-                      keyboardType="numeric"
-                      value={ftp}
-                      onChangeText={setFtp}
-                    />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.inputLabel}>PESO (KG)</Text>
-                    <TextInput
-                      style={styles.input}
-                      keyboardType="numeric"
-                      value={peso}
-                      onChangeText={setPeso}
-                    />
-                  </View>
-                </View>
-
-                <Text style={styles.inputLabel}>INTERVALS.ICU ATHLETE ID (OPCIONAL)</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Ej: i717135"
-                  placeholderTextColor="#64748b"
-                  autoCapitalize="none"
-                  value={athleteId}
-                  onChangeText={setAthleteId}
-                />
-
-                <Text style={styles.inputLabel}>INTERVALS.ICU API KEY (OPCIONAL)</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Tu clave API de Intervals.icu"
-                  placeholderTextColor="#64748b"
-                  autoCapitalize="none"
-                  secureTextEntry
-                  value={apiKey}
-                  onChangeText={setApiKey}
-                />
+                <TouchableOpacity
+                  style={styles.intervalsSignupBtn}
+                  onPress={() => Linking.openURL('https://intervals.icu/')}
+                >
+                  <Text style={styles.intervalsSignupBtnText}>
+                    🌐 ¿No tienes cuenta en Intervals.icu? Créala gratis aquí
+                  </Text>
+                </TouchableOpacity>
               </>
             )}
 
             <TouchableOpacity
-              style={styles.submitBtn}
-              onPress={ejecutarLoginORegistro}
-              disabled={cargandoAuth}
+              style={{ marginTop: 22, alignItems: 'center' }}
+              onPress={() => setMostrarManual((v) => !v)}
             >
-              {cargandoAuth ? (
-                <ActivityIndicator color="#020617" />
-              ) : (
-                <Text style={styles.submitBtnText}>
-                  {modoRegistro ? 'Crear Cuenta y Entrar' : 'Entrar a mi Panel'}
-                </Text>
-              )}
+              <Text style={{ color: '#64748b', fontSize: 12, fontWeight: '700' }}>
+                {mostrarManual ? 'Ocultar acceso con email ▴' : 'Entrar con email y contraseña ▾'}
+              </Text>
             </TouchableOpacity>
 
-            {!modoRegistro && (
-              <Text style={styles.demoHint}>
-                💡 Tu cuenta principal es diego@allue.com (contraseña inicial: 123456)
-              </Text>
+            {mostrarManual && (
+              <View style={{ marginTop: 12, borderTopWidth: 1, borderColor: '#1e293b', paddingTop: 12 }}>
+                <View style={styles.modeSwitchRow}>
+                  <TouchableOpacity
+                    style={[styles.modeBtn, !modoRegistro && styles.modeBtnActive]}
+                    onPress={() => setModoRegistro(false)}
+                  >
+                    <Text style={[styles.modeBtnText, !modoRegistro && styles.modeBtnTextActive]}>
+                      Entrar
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.modeBtn, modoRegistro && styles.modeBtnActive]}
+                    onPress={() => setModoRegistro(true)}
+                  >
+                    <Text style={[styles.modeBtnText, modoRegistro && styles.modeBtnTextActive]}>
+                      Vincular Manual
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {modoRegistro && (
+                  <>
+                    <Text style={styles.inputLabel}>NOMBRE</Text>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="Tu nombre"
+                      placeholderTextColor="#64748b"
+                      value={nombre}
+                      onChangeText={setNombre}
+                    />
+                  </>
+                )}
+
+                <Text style={styles.inputLabel}>EMAIL</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="tu@email.com"
+                  placeholderTextColor="#64748b"
+                  autoCapitalize="none"
+                  value={email}
+                  onChangeText={setEmail}
+                />
+
+                <Text style={styles.inputLabel}>CONTRASEÑA</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="••••••••"
+                  placeholderTextColor="#64748b"
+                  secureTextEntry
+                  value={password}
+                  onChangeText={setPassword}
+                />
+
+                {modoRegistro && (
+                  <>
+                    <Text style={styles.inputLabel}>ATHLETE ID DE INTERVALS.ICU (EJ: i717135)</Text>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="i717135"
+                      placeholderTextColor="#64748b"
+                      autoCapitalize="none"
+                      value={athleteId}
+                      onChangeText={setAthleteId}
+                    />
+                    <Text style={styles.inputLabel}>API KEY DE INTERVALS.ICU</Text>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="Tu API Key en Settings > Developer"
+                      placeholderTextColor="#64748b"
+                      autoCapitalize="none"
+                      secureTextEntry
+                      value={apiKey}
+                      onChangeText={setApiKey}
+                    />
+                  </>
+                )}
+
+                <TouchableOpacity style={styles.submitBtn} onPress={ejecutarLoginORegistro}>
+                  <Text style={styles.submitBtnText}>
+                    {modoRegistro ? 'Guardar y Entrar' : 'Entrar a mi Panel'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
             )}
           </View>
         </ScrollView>
@@ -293,7 +350,6 @@ export default function AppLayout() {
   // ==================== APLICACIÓN AUTENTICADA ====================
   return (
     <View style={{ flex: 1, backgroundColor: '#020617' }}>
-      {/* Barra superior compacta con el usuario activo */}
       <View style={styles.userTopBar}>
         <TouchableOpacity style={styles.userPill} onPress={abrirModalPerfil}>
           <Ionicons name="person-circle" size={16} color="#10b981" />
@@ -361,78 +417,43 @@ export default function AppLayout() {
         />
       </Tabs>
 
-      {/* MODAL DE PERFIL Y CONEXIÓN INTERVALS.ICU */}
       <Modal visible={perfilModal} transparent animationType="slide">
         <View style={styles.modalBackdrop}>
           <View style={styles.modalSheet}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>👤 Perfil del Ciclista ({usuario.email})</Text>
+              <Text style={styles.modalTitle}>👤 {usuario.nombre}</Text>
               <TouchableOpacity onPress={() => setPerfilModal(false)}>
                 <Text style={{ color: '#94a3b8', fontSize: 18, fontWeight: '800' }}>✕</Text>
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={{ marginTop: 10 }}>
-              <Text style={styles.inputLabel}>NOMBRE</Text>
-              <TextInput style={styles.input} value={editNombre} onChangeText={setEditNombre} />
+            <Text style={styles.inputLabel}>NOMBRE</Text>
+            <TextInput style={styles.input} value={editNombre} onChangeText={setEditNombre} />
 
-              <View style={{ flexDirection: 'row', gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>FTP (W)</Text>
-                  <TextInput style={styles.input} keyboardType="numeric" value={editFtp} onChangeText={setEditFtp} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>PESO (KG)</Text>
-                  <TextInput style={styles.input} keyboardType="numeric" value={editPeso} onChangeText={setEditPeso} />
-                </View>
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.inputLabel}>FTP (W)</Text>
+                <TextInput style={styles.input} keyboardType="numeric" value={editFtp} onChangeText={setEditFtp} />
               </View>
-
-              <View style={{ flexDirection: 'row', gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>LTHR (BPM)</Text>
-                  <TextInput style={styles.input} keyboardType="numeric" value={editLthr} onChangeText={setEditLthr} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>FC MÁX (BPM)</Text>
-                  <TextInput style={styles.input} keyboardType="numeric" value={editMaxHr} onChangeText={setEditMaxHr} />
-                </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.inputLabel}>PESO (KG)</Text>
+                <TextInput style={styles.input} keyboardType="numeric" value={editPeso} onChangeText={setEditPeso} />
               </View>
+            </View>
 
-              <Text style={styles.inputLabel}>INTERVALS.ICU ATHLETE ID</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Ej: i717135"
-                placeholderTextColor="#64748b"
-                autoCapitalize="none"
-                value={editAthId}
-                onChangeText={setEditAthId}
-              />
+            <TouchableOpacity style={styles.submitBtn} onPress={guardarCambiosPerfil}>
+              <Text style={styles.submitBtnText}>Guardar Cambios</Text>
+            </TouchableOpacity>
 
-              <Text style={styles.inputLabel}>NUEVA API KEY DE INTERVALS.ICU (DEJAR EN BLANCO PARA CONSERVAR)</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="••••••••••••"
-                placeholderTextColor="#64748b"
-                autoCapitalize="none"
-                secureTextEntry
-                value={editApiKey}
-                onChangeText={setEditApiKey}
-              />
-
-              <TouchableOpacity style={styles.submitBtn} onPress={guardarCambiosPerfil}>
-                <Text style={styles.submitBtnText}>Guardar Perfil y Sincronizar</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.logoutBtn}
-                onPress={() => {
-                  setPerfilModal(false);
-                  cerrarSesionLocal();
-                }}
-              >
-                <Text style={styles.logoutBtnText}>Cerrar Sesión / Cambiar de Usuario</Text>
-              </TouchableOpacity>
-            </ScrollView>
+            <TouchableOpacity
+              style={styles.logoutBtn}
+              onPress={() => {
+                setPerfilModal(false);
+                cerrarSesionLocal();
+              }}
+            >
+              <Text style={styles.logoutBtnText}>Cerrar Sesión / Cambiar Cuenta de Intervals.icu</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -462,19 +483,57 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   authBrand: { color: '#ffffff', fontSize: 24, fontWeight: '900', textAlign: 'center' },
-  authSubtitle: { color: '#94a3b8', fontSize: 12.5, textAlign: 'center', marginTop: 6, marginBottom: 18 },
+  authSubtitle: { color: '#94a3b8', fontSize: 12.5, textAlign: 'center', marginTop: 6, marginBottom: 20, lineHeight: 18 },
+
+  intervalsPrimaryBtn: {
+    backgroundColor: '#38bdf8',
+    paddingVertical: 15,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  intervalsPrimaryBtnText: { color: '#020617', fontSize: 15, fontWeight: '900' },
+
+  intervalsSignupBtn: {
+    marginTop: 10,
+    backgroundColor: '#020617',
+    borderColor: '#334155',
+    borderWidth: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+  },
+  intervalsSignupBtnText: { color: '#38bdf8', fontSize: 12, fontWeight: '800' },
+
+  oauthWaitingBox: {
+    backgroundColor: '#020617',
+    borderRadius: 16,
+    padding: 18,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#38bdf8',
+  },
+  oauthWaitingTitle: { color: '#ffffff', fontSize: 14, fontWeight: '800', marginTop: 12, textAlign: 'center' },
+  oauthWaitingSub: { color: '#94a3b8', fontSize: 12, marginTop: 6, textAlign: 'center', lineHeight: 17 },
+  cancelOAuthBtn: { marginTop: 14, paddingVertical: 8, paddingHorizontal: 16 },
+  cancelOAuthText: { color: '#f43f5e', fontWeight: '800', fontSize: 12 },
+
   modeSwitchRow: {
     flexDirection: 'row',
     backgroundColor: '#020617',
     borderRadius: 12,
     padding: 4,
-    marginBottom: 16,
+    marginBottom: 12,
     borderWidth: 1,
     borderColor: '#1e293b',
   },
-  modeBtn: { flex: 1, paddingVertical: 9, borderRadius: 9, alignItems: 'center' },
+  modeBtn: { flex: 1, paddingVertical: 8, borderRadius: 9, alignItems: 'center' },
   modeBtnActive: { backgroundColor: '#10b981' },
-  modeBtnText: { color: '#94a3b8', fontWeight: '800', fontSize: 12.5 },
+  modeBtnText: { color: '#94a3b8', fontWeight: '800', fontSize: 12 },
   modeBtnTextActive: { color: '#020617', fontWeight: '900' },
   inputLabel: { color: '#94a3b8', fontSize: 10, fontWeight: '800', marginBottom: 5, marginTop: 10 },
   input: {
@@ -492,10 +551,9 @@ const styles = StyleSheet.create({
     paddingVertical: 13,
     borderRadius: 12,
     alignItems: 'center',
-    marginTop: 20,
+    marginTop: 18,
   },
   submitBtnText: { color: '#020617', fontSize: 14, fontWeight: '900' },
-  demoHint: { color: '#64748b', fontSize: 11, textAlign: 'center', marginTop: 14 },
 
   userTopBar: {
     position: 'absolute',
@@ -522,7 +580,6 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: 20,
-    maxHeight: '88%',
     borderTopWidth: 1,
     borderColor: '#1e293b',
   },
@@ -537,7 +594,7 @@ const styles = StyleSheet.create({
   modalTitle: { color: '#ffffff', fontSize: 16, fontWeight: '900' },
   logoutBtn: {
     marginTop: 12,
-    marginBottom: 20,
+    marginBottom: 14,
     paddingVertical: 12,
     borderRadius: 12,
     borderWidth: 1,

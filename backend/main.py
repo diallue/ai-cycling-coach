@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, Response, Header, Query, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
@@ -17,7 +18,7 @@ from database import SessionLocal, engine, Base, get_db
 import models
 import workout_generator
 
-app = FastAPI(title="AI Cycling Coach Multi-User API")
+app = FastAPI(title="AI Cycling Coach Multi-User & OAuth2 API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,8 +61,6 @@ def asegurar_columnas_nuevas():
                 pass
 
 
-asegurar_columnas_nuevas()
-
 def sincronizar_secuencias():
     """Resincroniza las secuencias auto-incrementales de PostgreSQL con el MAX(id) real."""
     tablas = ["usuarios", "objetivos", "entrenamientos_programados", "fases_macrociclo"]
@@ -79,16 +78,21 @@ def sincronizar_secuencias():
             pass
 
 
+asegurar_columnas_nuevas()
 sincronizar_secuencias()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 DEFAULT_ATHLETE_ID = os.getenv("INTERVALS_ATHLETE_ID")
 DEFAULT_API_KEY = os.getenv("INTERVALS_API_KEY")
+INTERVALS_CLIENT_ID = os.getenv("INTERVALS_CLIENT_ID", "")
+INTERVALS_CLIENT_SECRET = os.getenv("INTERVALS_CLIENT_SECRET", "")
+BACKEND_PUBLIC_URL = os.getenv("BACKEND_PUBLIC_URL", "https://ai-cycling-coach-822a.onrender.com")
 BASE_URL = "https://intervals.icu/api/v1/athlete"
 
-# Caché en memoria indexado por usuario_id
+# Caché en memoria indexado por usuario_id y estados pendientes de OAuth2
 _TELEMETRIA_CACHE: Dict[int, dict] = {}
+_OAUTH_PENDING_STATES: Dict[str, dict] = {}
 
 
 def hash_password(password: str) -> str:
@@ -142,6 +146,7 @@ def asegurar_usuario_inicial():
             if not usuario_principal.intervals_api_key and DEFAULT_API_KEY:
                 usuario_principal.intervals_api_key = DEFAULT_API_KEY
             db.commit()
+        sincronizar_secuencias()
     except Exception as e:
         print(f"Nota sobre el usuario inicial: {e}")
     finally:
@@ -153,7 +158,6 @@ def obtener_usuario_actual(
     token_query: Optional[str] = Query(None, alias="token"),
     db: Session = Depends(get_db)
 ) -> models.Usuario:
-    """Obtiene el usuario autenticado mediante su Bearer Token (con fallback seguro al usuario 1 si no se envía)."""
     token = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization.replace("Bearer ", "").strip()
@@ -243,13 +247,22 @@ def _num(valor, defecto, minimo, maximo):
 
 
 def credenciales_intervals(usuario: models.Usuario):
+    """Devuelve (athlete_id, httpx_kwargs) soportando tanto OAuth2 Bearer como API_KEY clásica."""
     ath_id = (usuario.intervals_athlete_id or "").strip()
     api_k = (usuario.intervals_api_key or "").strip()
     if not ath_id and usuario.id == 1:
         ath_id = DEFAULT_ATHLETE_ID or ""
     if not api_k and usuario.id == 1:
         api_k = DEFAULT_API_KEY or ""
-    return ath_id, api_k
+
+    if not ath_id or not api_k:
+        return "", {}
+
+    if api_k.startswith("BEARER:"):
+        token_oauth = api_k.replace("BEARER:", "", 1).strip()
+        return ath_id, {"headers": {"Authorization": f"Bearer {token_oauth}"}}
+
+    return ath_id, {"auth": ("API_KEY", api_k)}
 
 
 def obtener_telemetria_intervals_en_vivo(db: Session, usuario: models.Usuario, forzar: bool = False):
@@ -282,15 +295,16 @@ def obtener_telemetria_intervals_en_vivo(db: Session, usuario: models.Usuario, f
     ctl_live = round(act_con_ftp.icu_ctl, 1) if (act_con_ftp and act_con_ftp.icu_ctl) else 0.0
     atl_live = round(act_con_ftp.icu_atl, 1) if (act_con_ftp and act_con_ftp.icu_atl) else 0.0
 
-    ath_id, api_k = credenciales_intervals(usuario)
+    ath_id, auth_kwargs = credenciales_intervals(usuario)
 
-    if ath_id and api_k:
-        auth = ("API_KEY", api_k)
+    if ath_id and auth_kwargs:
         try:
             with httpx.Client(timeout=4.5) as client_http:
-                resp_ath = client_http.get(f"{BASE_URL}/{ath_id}", auth=auth)
+                resp_ath = client_http.get(f"{BASE_URL}/{ath_id}", **auth_kwargs)
                 if resp_ath.status_code == 200:
                     data = resp_ath.json()
+                    if data.get("name") and (not usuario.nombre or usuario.nombre.startswith("Ciclista")):
+                        usuario.nombre = data["name"]
                     peso_api = data.get("icu_weight") or data.get("weight")
                     if peso_api:
                         peso = round(float(peso_api), 1)
@@ -323,7 +337,7 @@ def obtener_telemetria_intervals_en_vivo(db: Session, usuario: models.Usuario, f
                 resp_well = client_http.get(
                     f"{BASE_URL}/{ath_id}/wellness",
                     params={"oldest": oldest_w, "newest": newest_w},
-                    auth=auth
+                    **auth_kwargs
                 )
                 if resp_well.status_code == 200:
                     well_list = resp_well.json()
@@ -551,8 +565,6 @@ def normalizar_estructura(bloques, duracion_total, tipo_sesion=""):
     dur_total_int = int(duracion_total or 0)
     if dur_total_int <= 0:
         return None
-    if not isinstance(bloques, list) or not bloques:
-        return generar_estructura_respaldo(tipo_sesion, dur_total_int)
     return generar_estructura_respaldo(tipo_sesion, dur_total_int)
 
 
@@ -657,8 +669,162 @@ def formatear_respuesta_semanal_markdown(guardado: list, ftp: int) -> str:
 
 
 # ============================================================================
-# ENDPOINTS DE AUTENTICACIÓN Y GESTIÓN DE CUENTA MULTIUSUARIO
+# ENDPOINTS OAUTH2 OFICIAL DE INTERVALS.ICU + GESTIÓN DE CUENTA
 # ============================================================================
+@app.get("/api/auth/intervals/login-url")
+def obtener_url_oauth_intervals():
+    """Genera la URL de autorización OAuth2 hacia Intervals.icu y un state para la app móvil."""
+    state = secrets.token_urlsafe(24)
+    _OAUTH_PENDING_STATES[state] = {"status": "pending", "created_at": datetime.now()}
+
+    if not INTERVALS_CLIENT_ID:
+        return {
+            "oauth_configurado": False,
+            "state": state,
+            "mensaje": "Falta configurar INTERVALS_CLIENT_ID en las variables de entorno de Render.",
+            "registro_intervals_url": "https://intervals.icu/"
+        }
+
+    redirect_uri = f"{BACKEND_PUBLIC_URL}/api/auth/intervals/callback"
+    scope = "ACTIVITY:READ,WELLNESS:READ,CALENDAR:WRITE,SETTINGS:READ"
+    authorize_url = (
+        f"https://intervals.icu/oauth/authorize"
+        f"?client_id={INTERVALS_CLIENT_ID}"
+        f"&redirect_uri={redirect_uri}"
+        f"&scope={scope}"
+        f"&state={state}"
+    )
+    return {
+        "oauth_configurado": True,
+        "state": state,
+        "authorize_url": authorize_url,
+        "registro_intervals_url": "https://intervals.icu/"
+    }
+
+
+@app.get("/api/auth/intervals/callback", response_class=HTMLResponse)
+def oauth_intervals_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Recibe la confirmación de Intervals.icu, canjea el access_token y vincula/crea al ciclista."""
+    if error or not code:
+        if state and state in _OAUTH_PENDING_STATES:
+            _OAUTH_PENDING_STATES[state] = {"status": "error", "detail": error or "Cancelado"}
+        return """
+        <html><body style="background:#020617;color:#f8fafc;font-family:sans-serif;text-align:center;padding:50px;">
+            <h2 style="color:#f43f5e;">Autorización cancelada</h2>
+            <p>Puedes cerrar esta ventana y volver a VeloCoach Pro.</p>
+        </body></html>
+        """
+
+    try:
+        with httpx.Client(timeout=10.0) as client_http:
+            resp = client_http.post(
+                "https://intervals.icu/api/oauth/token",
+                data={
+                    "client_id": INTERVALS_CLIENT_ID,
+                    "client_secret": INTERVALS_CLIENT_SECRET,
+                    "code": code,
+                }
+            )
+
+        if resp.status_code != 200:
+            raise Exception(f"Fallo canjeando token OAuth: {resp.text}")
+
+        token_data = resp.json()
+        access_token = token_data.get("access_token")
+        athlete_info = token_data.get("athlete") or {}
+        athlete_id = str(athlete_info.get("id") or "").strip()
+        athlete_name = athlete_info.get("name") or "Ciclista Intervals"
+        athlete_email = (athlete_info.get("email") or f"{athlete_id}@intervals.icu").lower()
+
+        if not access_token or not athlete_id:
+            raise Exception("Intervals.icu no devolvió athlete_id o access_token.")
+
+        usuario = db.query(models.Usuario).filter(
+            models.Usuario.intervals_athlete_id == athlete_id
+        ).first()
+
+        if not usuario:
+            usuario = db.query(models.Usuario).filter(
+                models.Usuario.email == athlete_email
+            ).first()
+
+        sincronizar_secuencias()
+        token_sesion = secrets.token_urlsafe(32)
+
+        if not usuario:
+            usuario = models.Usuario(
+                email=athlete_email,
+                nombre=athlete_name,
+                intervals_athlete_id=athlete_id,
+                intervals_api_key=f"BEARER:{access_token}",
+                token_sesion=token_sesion,
+                ftp_actual=250,
+                peso_actual=70.0,
+                lthr=175,
+                max_hr=195,
+            )
+            db.add(usuario)
+        else:
+            usuario.nombre = athlete_name or usuario.nombre
+            usuario.intervals_athlete_id = athlete_id
+            usuario.intervals_api_key = f"BEARER:{access_token}"
+            usuario.token_sesion = token_sesion
+
+        db.commit()
+        db.refresh(usuario)
+
+        obtener_telemetria_intervals_en_vivo(db, usuario, forzar=True)
+
+        if state:
+            _OAUTH_PENDING_STATES[state] = {
+                "status": "completed",
+                "token": token_sesion,
+                "usuario": serializar_usuario(usuario),
+                "created_at": datetime.now()
+            }
+
+        return f"""
+        <html><body style="background:#020617;color:#f8fafc;font-family:sans-serif;text-align:center;padding:50px;">
+            <div style="max-width:400px;margin:0 auto;background:#0f172a;padding:30px;border-radius:20px;border:1px solid #10b981;">
+                <div style="font-size:42px;">🚴‍♂️✅</div>
+                <h2 style="color:#10b981;">¡Hola, {usuario.nombre}!</h2>
+                <p style="color:#cbd5e1;line-height:1.5;">Tu cuenta de <b>Intervals.icu ({athlete_id})</b> se ha vinculado automáticamente con VeloCoach IA.</p>
+                <p style="color:#38bdf8;font-weight:bold;margin-top:20px;">Ya puedes volver a la aplicación.</p>
+            </div>
+        </body></html>
+        """
+    except Exception as e:
+        if state:
+            _OAUTH_PENDING_STATES[state] = {"status": "error", "detail": str(e)}
+        return f"""
+        <html><body style="background:#020617;color:#f8fafc;font-family:sans-serif;text-align:center;padding:50px;">
+            <h2 style="color:#f43f5e;">Error al vincular con Intervals.icu</h2>
+            <p>{str(e)}</p>
+        </body></html>
+        """
+
+
+@app.get("/api/auth/intervals/poll/{state}")
+def consultar_estado_oauth(state: str):
+    """La app móvil consulta este endpoint cada 2s mientras el usuario autoriza en el navegador."""
+    info = _OAUTH_PENDING_STATES.get(state)
+    if not info:
+        return {"status": "not_found"}
+    if info.get("status") == "completed":
+        datos = _OAUTH_PENDING_STATES.pop(state, info)
+        return {
+            "status": "completed",
+            "token": datos["token"],
+            "usuario": datos["usuario"]
+        }
+    return {"status": info.get("status", "pending"), "detail": info.get("detail")}
+
+
 @app.post("/api/auth/register")
 def registrar_usuario(payload: RegistroPayload, db: Session = Depends(get_db)):
     email_limpio = payload.email.strip().lower()
@@ -685,9 +851,8 @@ def registrar_usuario(payload: RegistroPayload, db: Session = Depends(get_db)):
     try:
         db.add(nuevo)
         db.commit()
-    except Exception as e:
+    except Exception:
         db.rollback()
-        # Resincronizar la secuencia si venía desfasada por el usuario inicial id=1
         sincronizar_secuencias()
         try:
             db.add(nuevo)
@@ -712,7 +877,6 @@ def login_usuario(payload: LoginPayload, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="No existe ninguna cuenta con ese email.")
 
     hash_intento = hash_password(payload.password)
-    # Si el usuario 1 existía antes de tener password_hash, le permitimos entrar y fijamos su contraseña
     if usuario.password_hash and usuario.password_hash != hash_intento:
         raise HTTPException(status_code=401, detail="Contraseña incorrecta.")
 
@@ -764,7 +928,7 @@ def actualizar_perfil_usuario(
 
 @app.get("/")
 def read_root():
-    return {"status": "ok", "message": "Backend VeloCoach Pro Multi-User activo"}
+    return {"status": "ok", "message": "Backend VeloCoach Pro Multi-User & OAuth2 activo"}
 
 
 @app.post("/sync")
@@ -772,19 +936,18 @@ async def sync_activities(
     usuario: models.Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(get_db)
 ):
-    ath_id, api_k = credenciales_intervals(usuario)
-    if not ath_id or not api_k:
-        return {"status": "no_credentials", "message": "Configura tu Athlete ID y API Key de Intervals.icu en tu perfil."}
+    ath_id, auth_kwargs = credenciales_intervals(usuario)
+    if not ath_id or not auth_kwargs:
+        return {"status": "no_credentials", "message": "Conecta tu cuenta con Intervals.icu primero."}
 
     oldest = "2022-01-01T00:00:00"
     newest = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     url = f"{BASE_URL}/{ath_id}/activities"
     params = {"oldest": oldest, "newest": newest}
-    auth = ("API_KEY", api_k)
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client_http:
-            response = await client_http.get(url, params=params, auth=auth)
+            response = await client_http.get(url, params=params, **auth_kwargs)
 
         if response.status_code != 200:
             return {"status": "cached", "message": "Usando datos locales (Intervals.icu no responde)"}
@@ -890,6 +1053,7 @@ def crear_o_actualizar_objetivo(
     db: Session = Depends(get_db)
 ):
     try:
+        sincronizar_secuencias()
         fecha_dt = datetime.strptime(payload.fecha_meta.strip(), "%Y-%m-%d").date()
         prio = (payload.prioridad or "B").upper()[:1]
         nuevo = models.Objetivo(
@@ -934,6 +1098,7 @@ def checkin_diario_adaptativo(
     db: Session = Depends(get_db)
 ):
     try:
+        sincronizar_secuencias()
         fecha_obj = (
             datetime.strptime(payload.fecha.strip(), "%Y-%m-%d").date()
             if payload.fecha else datetime.now().date()
@@ -1020,6 +1185,7 @@ def chat_entrenador(
     db: Session = Depends(get_db)
 ):
     try:
+        sincronizar_secuencias()
         hoy_dt = datetime.now()
         hoy_date = hoy_dt.date()
         uid = usuario.id
@@ -1512,9 +1678,9 @@ async def exportar_a_nube(
     db: Session = Depends(get_db)
 ):
     try:
-        ath_id, api_k = credenciales_intervals(usuario)
-        if not ath_id or not api_k:
-            return {"error": "Configura primero tu Athlete ID y API Key de Intervals.icu en tu perfil."}
+        ath_id, auth_kwargs = credenciales_intervals(usuario)
+        if not ath_id or not auth_kwargs:
+            return {"error": "Conecta primero tu cuenta con Intervals.icu."}
 
         sesion = db.query(models.EntrenamientoProgramado).filter(
             models.EntrenamientoProgramado.id == sesion_id,
@@ -1541,10 +1707,9 @@ async def exportar_a_nube(
         }
 
         url = f"{BASE_URL}/{ath_id}/events"
-        auth = ("API_KEY", api_k)
 
         async with httpx.AsyncClient() as client_http:
-            response = await client_http.post(url, json=payload, auth=auth)
+            response = await client_http.post(url, json=payload, **auth_kwargs)
 
         if response.status_code == 200:
             return {"status": "success"}
@@ -1560,9 +1725,9 @@ async def exportar_archivo_fit(
     db: Session = Depends(get_db)
 ):
     try:
-        ath_id, api_k = credenciales_intervals(usuario)
-        if not ath_id or not api_k:
-            return {"error": "Configura tu cuenta de Intervals.icu en tu perfil para compilar archivos .FIT"}
+        ath_id, auth_kwargs = credenciales_intervals(usuario)
+        if not ath_id or not auth_kwargs:
+            return {"error": "Conecta tu cuenta de Intervals.icu para compilar archivos .FIT"}
 
         sesion = db.query(models.EntrenamientoProgramado).filter(
             models.EntrenamientoProgramado.id == sesion_id,
@@ -1584,16 +1749,15 @@ async def exportar_archivo_fit(
             "description": workout_text
         }
         url_events = f"{BASE_URL}/{ath_id}/events"
-        auth = ("API_KEY", api_k)
 
         async with httpx.AsyncClient() as client_http:
-            resp_post = await client_http.post(url_events, json=payload, auth=auth)
+            resp_post = await client_http.post(url_events, json=payload, **auth_kwargs)
             if resp_post.status_code != 200:
                 return {"error": "Fallo en la compilación"}
 
             evento_id = resp_post.json().get("id")
             url_fit = f"{BASE_URL}/{ath_id}/events/{evento_id}/download.fit"
-            resp_fit = await client_http.get(url_fit, auth=auth)
+            resp_fit = await client_http.get(url_fit, **auth_kwargs)
 
             return Response(
                 content=resp_fit.content,
