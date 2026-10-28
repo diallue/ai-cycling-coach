@@ -62,6 +62,25 @@ def asegurar_columnas_nuevas():
 
 asegurar_columnas_nuevas()
 
+def sincronizar_secuencias():
+    """Resincroniza las secuencias auto-incrementales de PostgreSQL con el MAX(id) real."""
+    tablas = ["usuarios", "objetivos", "entrenamientos_programados", "fases_macrociclo"]
+    for tabla in tablas:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"""
+                    SELECT setval(
+                        pg_get_serial_sequence('{tabla}', 'id'),
+                        COALESCE((SELECT MAX(id) FROM {tabla}), 1),
+                        true
+                    );
+                """))
+        except Exception:
+            pass
+
+
+sincronizar_secuencias()
+
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 DEFAULT_ATHLETE_ID = os.getenv("INTERVALS_ATHLETE_ID")
@@ -663,11 +682,22 @@ def registrar_usuario(payload: RegistroPayload, db: Session = Depends(get_db)):
         intervals_athlete_id=(payload.intervals_athlete_id or "").strip() or None,
         intervals_api_key=(payload.intervals_api_key or "").strip() or None,
     )
-    db.add(nuevo)
-    db.commit()
+    try:
+        db.add(nuevo)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        # Resincronizar la secuencia si venía desfasada por el usuario inicial id=1
+        sincronizar_secuencias()
+        try:
+            db.add(nuevo)
+            db.commit()
+        except Exception as e2:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Error en el registro: {str(e2)}")
+
     db.refresh(nuevo)
 
-    # Si introdujo claves de Intervals.icu, sincronizamos su telemetría inicial
     if nuevo.intervals_athlete_id and nuevo.intervals_api_key:
         obtener_telemetria_intervals_en_vivo(db, nuevo, forzar=True)
 
