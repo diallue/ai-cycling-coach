@@ -4,24 +4,24 @@ from database import Base
 
 
 class Usuario(Base):
-    """Entidad central del ciclista con telemetría sincronizada desde Intervals.icu y disponibilidad persistente."""
+    """Entidad central del ciclista con autenticación, credenciales Intervals.icu propias y telemetría."""
     __tablename__ = "usuarios"
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     nombre = Column(String, nullable=False)
+    password_hash = Column(String, nullable=True)
+    token_sesion = Column(String, index=True, nullable=True)
 
     intervals_athlete_id = Column(String, nullable=True)
     intervals_api_key = Column(String, nullable=True)
 
-    # Parámetros fisiológicos dinámicos sincronizados con Intervals.icu
-    ftp_actual = Column(Integer, default=305)
-    peso_actual = Column(Float, default=71.0)
-    lthr = Column(Integer, default=178)
-    max_hr = Column(Integer, default=200)
+    ftp_actual = Column(Integer, default=250)
+    peso_actual = Column(Float, default=70.0)
+    lthr = Column(Integer, default=175)
+    max_hr = Column(Integer, default=195)
     w_prime = Column(Integer, nullable=True)
 
-    # Memoria persistente de disponibilidad semanal (ej. "L-J=2h, V=0h, S-D=6h")
     disponibilidad_json = Column(String, nullable=True)
 
     actividades = relationship("Activity", back_populates="usuario")
@@ -55,7 +55,6 @@ class Activity(Base):
 
 
 class Objetivo(Base):
-    """Soporta múltiples objetivos por temporada con prioridades A (principal), B (secundario) y C (preparatorio)."""
     __tablename__ = "objetivos"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -63,9 +62,9 @@ class Objetivo(Base):
 
     nombre = Column(String, index=True)
     fecha_meta = Column(Date)
-    prioridad = Column(String, default="A")          # "A", "B" o "C"
-    tipo_evento = Column(String, nullable=True)      # Ej: "Everesting", "Gran Fondo", "XCO", "Etapas"
-    detalles_evento = Column(String, nullable=True)  # Puerto, desnivel, distancia o exigencia
+    prioridad = Column(String, default="A")
+    tipo_evento = Column(String, nullable=True)
+    detalles_evento = Column(String, nullable=True)
     disponibilidad_semanal = Column(String, nullable=True)
     activo = Column(Boolean, default=True)
 
@@ -74,7 +73,6 @@ class Objetivo(Base):
 
 
 class EntrenamientoProgramado(Base):
-    """El calendario vivo con soporte para bloques estructurados JSON y conciliación automática con Intervals.icu."""
     __tablename__ = "entrenamientos_programados"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -89,11 +87,8 @@ class EntrenamientoProgramado(Base):
 
     estado = Column(String, default="Pendiente")
     motivo_adaptacion = Column(String, nullable=True)
-
-    # Columna clave para almacenar la lista JSON de bloques diseñados por la IA
     estructura = Column(String, nullable=True)
 
-    # Conciliación con actividades reales completadas en Intervals.icu
     tss_real = Column(Integer, nullable=True)
     actividad_completada_id = Column(String, nullable=True)
 
@@ -101,7 +96,6 @@ class EntrenamientoProgramado(Base):
 
 
 class FaseMacrociclo(Base):
-    """Cada uno de los bloques/mesociclos que componen la preparación hacia el Objetivo."""
     __tablename__ = "fases_macrociclo"
 
     id = Column(Integer, primary_key=True, index=True)

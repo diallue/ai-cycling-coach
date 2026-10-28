@@ -1,8 +1,10 @@
-from fastapi import FastAPI, Depends, Response
+from fastapi import FastAPI, Depends, Response, Header, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
 import json
+import hashlib
+import secrets
 import httpx
 from datetime import datetime, timedelta
 from sqlalchemy import text
@@ -15,7 +17,7 @@ from database import SessionLocal, engine, Base, get_db
 import models
 import workout_generator
 
-app = FastAPI(title="AI Cycling Coach API")
+app = FastAPI(title="AI Cycling Coach Multi-User API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +40,8 @@ def asegurar_columnas_nuevas():
         "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS max_hr INTEGER DEFAULT 200",
         "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS w_prime INTEGER",
         "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS disponibilidad_json TEXT",
+        "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
+        "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS token_sesion VARCHAR",
         "ALTER TABLE objetivos ADD COLUMN IF NOT EXISTS prioridad VARCHAR DEFAULT 'A'",
         "ALTER TABLE objetivos ADD COLUMN IF NOT EXISTS tipo_evento VARCHAR",
         "ALTER TABLE objetivos ADD COLUMN IF NOT EXISTS detalles_evento TEXT",
@@ -60,11 +64,34 @@ asegurar_columnas_nuevas()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-ATHLETE_ID = os.getenv("INTERVALS_ATHLETE_ID")
-API_KEY = os.getenv("INTERVALS_API_KEY")
+DEFAULT_ATHLETE_ID = os.getenv("INTERVALS_ATHLETE_ID")
+DEFAULT_API_KEY = os.getenv("INTERVALS_API_KEY")
 BASE_URL = "https://intervals.icu/api/v1/athlete"
 
-_TELEMETRIA_CACHE = {"timestamp": None, "data": None}
+# Caché en memoria indexado por usuario_id
+_TELEMETRIA_CACHE: Dict[int, dict] = {}
+
+
+def hash_password(password: str) -> str:
+    salt = "velocoach_pro_salt_2026"
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000).hex()
+
+
+def serializar_usuario(u: models.Usuario) -> dict:
+    ath_id = u.intervals_athlete_id or (DEFAULT_ATHLETE_ID if u.id == 1 else "")
+    has_key = bool(u.intervals_api_key or (DEFAULT_API_KEY if u.id == 1 else None))
+    return {
+        "id": u.id,
+        "email": u.email,
+        "nombre": u.nombre,
+        "ftp_actual": u.ftp_actual or 250,
+        "peso_actual": u.peso_actual or 70.0,
+        "lthr": u.lthr or 175,
+        "max_hr": u.max_hr or 195,
+        "intervals_athlete_id": ath_id or "",
+        "intervals_conectado": bool(ath_id and has_key),
+        "disponibilidad": u.disponibilidad_json,
+    }
 
 
 @app.on_event("startup")
@@ -77,6 +104,10 @@ def asegurar_usuario_inicial():
                 id=1,
                 email="diego@allue.com",
                 nombre="Diego Allue",
+                password_hash=hash_password("123456"),
+                token_sesion="token_diego_inicial",
+                intervals_athlete_id=DEFAULT_ATHLETE_ID,
+                intervals_api_key=DEFAULT_API_KEY,
                 ftp_actual=305,
                 peso_actual=71.0,
                 lthr=178,
@@ -84,10 +115,67 @@ def asegurar_usuario_inicial():
             )
             db.add(nuevo_usuario)
             db.commit()
+        else:
+            if not usuario_principal.password_hash:
+                usuario_principal.password_hash = hash_password("123456")
+            if not usuario_principal.intervals_athlete_id and DEFAULT_ATHLETE_ID:
+                usuario_principal.intervals_athlete_id = DEFAULT_ATHLETE_ID
+            if not usuario_principal.intervals_api_key and DEFAULT_API_KEY:
+                usuario_principal.intervals_api_key = DEFAULT_API_KEY
+            db.commit()
     except Exception as e:
         print(f"Nota sobre el usuario inicial: {e}")
     finally:
         db.close()
+
+
+def obtener_usuario_actual(
+    authorization: Optional[str] = Header(None),
+    token_query: Optional[str] = Query(None, alias="token"),
+    db: Session = Depends(get_db)
+) -> models.Usuario:
+    """Obtiene el usuario autenticado mediante su Bearer Token (con fallback seguro al usuario 1 si no se envía)."""
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "").strip()
+    elif token_query:
+        token = token_query.strip()
+
+    if token:
+        usuario = db.query(models.Usuario).filter(models.Usuario.token_sesion == token).first()
+        if usuario:
+            return usuario
+        raise HTTPException(status_code=401, detail="Sesión expirada o inválida. Vuelve a iniciar sesión.")
+
+    usuario_defecto = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
+    return usuario_defecto
+
+
+class RegistroPayload(BaseModel):
+    nombre: str
+    email: str
+    password: str
+    ftp_actual: Optional[int] = 250
+    peso_actual: Optional[float] = 70.0
+    lthr: Optional[int] = 175
+    max_hr: Optional[int] = 195
+    intervals_athlete_id: Optional[str] = None
+    intervals_api_key: Optional[str] = None
+
+
+class LoginPayload(BaseModel):
+    email: str
+    password: str
+
+
+class ActualizarPerfilPayload(BaseModel):
+    nombre: Optional[str] = None
+    ftp_actual: Optional[int] = None
+    peso_actual: Optional[float] = None
+    lthr: Optional[int] = None
+    max_hr: Optional[int] = None
+    intervals_athlete_id: Optional[str] = None
+    intervals_api_key: Optional[str] = None
 
 
 class MensajeHistorial(BaseModel):
@@ -135,27 +223,39 @@ def _num(valor, defecto, minimo, maximo):
     return max(minimo, min(maximo, n))
 
 
-def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
+def credenciales_intervals(usuario: models.Usuario):
+    ath_id = (usuario.intervals_athlete_id or "").strip()
+    api_k = (usuario.intervals_api_key or "").strip()
+    if not ath_id and usuario.id == 1:
+        ath_id = DEFAULT_ATHLETE_ID or ""
+    if not api_k and usuario.id == 1:
+        api_k = DEFAULT_API_KEY or ""
+    return ath_id, api_k
+
+
+def obtener_telemetria_intervals_en_vivo(db: Session, usuario: models.Usuario, forzar: bool = False):
     ahora = datetime.now()
+    uid = usuario.id
+    cache_usr = _TELEMETRIA_CACHE.get(uid)
     if (
         not forzar
-        and _TELEMETRIA_CACHE["data"] is not None
-        and _TELEMETRIA_CACHE["timestamp"] is not None
-        and (ahora - _TELEMETRIA_CACHE["timestamp"]).total_seconds() < 300
+        and cache_usr
+        and cache_usr.get("data") is not None
+        and cache_usr.get("timestamp") is not None
+        and (ahora - cache_usr["timestamp"]).total_seconds() < 300
     ):
-        return _TELEMETRIA_CACHE["data"]
+        return cache_usr["data"]
 
-    usuario = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
     act_con_ftp = db.query(models.Activity).filter(
-        models.Activity.usuario_id == 1,
+        models.Activity.usuario_id == uid,
         models.Activity.icu_ftp.isnot(None)
     ).order_by(models.Activity.start_date_local.desc()).first()
 
-    ftp = (usuario.ftp_actual if usuario and usuario.ftp_actual else None) or (act_con_ftp.icu_ftp if act_con_ftp else 305)
-    peso = (usuario.peso_actual if usuario and usuario.peso_actual else 71.0)
-    lthr = (usuario.lthr if usuario and usuario.lthr else 178)
-    max_hr = (usuario.max_hr if usuario and usuario.max_hr else 200)
-    w_prime = (usuario.w_prime if usuario else None)
+    ftp = (usuario.ftp_actual if usuario.ftp_actual else None) or (act_con_ftp.icu_ftp if act_con_ftp else 250)
+    peso = (usuario.peso_actual if usuario.peso_actual else 70.0)
+    lthr = (usuario.lthr if usuario.lthr else 175)
+    max_hr = (usuario.max_hr if usuario.max_hr else 195)
+    w_prime = usuario.w_prime
     hrv_rmssd = None
     resting_hr = None
     sleep_hours = None
@@ -163,11 +263,13 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
     ctl_live = round(act_con_ftp.icu_ctl, 1) if (act_con_ftp and act_con_ftp.icu_ctl) else 0.0
     atl_live = round(act_con_ftp.icu_atl, 1) if (act_con_ftp and act_con_ftp.icu_atl) else 0.0
 
-    if ATHLETE_ID and API_KEY:
-        auth = ("API_KEY", API_KEY)
+    ath_id, api_k = credenciales_intervals(usuario)
+
+    if ath_id and api_k:
+        auth = ("API_KEY", api_k)
         try:
             with httpx.Client(timeout=4.5) as client_http:
-                resp_ath = client_http.get(f"{BASE_URL}/{ATHLETE_ID}", auth=auth)
+                resp_ath = client_http.get(f"{BASE_URL}/{ath_id}", auth=auth)
                 if resp_ath.status_code == 200:
                     data = resp_ath.json()
                     peso_api = data.get("icu_weight") or data.get("weight")
@@ -200,7 +302,7 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
                 oldest_w = (ahora - timedelta(days=7)).strftime("%Y-%m-%d")
                 newest_w = ahora.strftime("%Y-%m-%d")
                 resp_well = client_http.get(
-                    f"{BASE_URL}/{ATHLETE_ID}/wellness",
+                    f"{BASE_URL}/{ath_id}/wellness",
                     params={"oldest": oldest_w, "newest": newest_w},
                     auth=auth
                 )
@@ -223,16 +325,15 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
                             if w.get("atl") is not None and atl_live == 0.0:
                                 atl_live = round(float(w["atl"]), 1)
 
-            if usuario:
-                usuario.ftp_actual = ftp
-                usuario.peso_actual = peso
-                usuario.lthr = lthr
-                usuario.max_hr = max_hr
-                if w_prime:
-                    usuario.w_prime = w_prime
-                db.commit()
+            usuario.ftp_actual = ftp
+            usuario.peso_actual = peso
+            usuario.lthr = lthr
+            usuario.max_hr = max_hr
+            if w_prime:
+                usuario.w_prime = w_prime
+            db.commit()
         except Exception as e:
-            print(f"Aviso telemetría Intervals.icu (usando caché BD): {e}")
+            print(f"Aviso telemetría Intervals.icu usuario {uid}: {e}")
 
     resultado = {
         "ftp": int(ftp),
@@ -248,27 +349,25 @@ def obtener_telemetria_intervals_en_vivo(db: Session, forzar: bool = False):
         "atl": atl_live,
         "tsb": round(ctl_live - atl_live, 1),
     }
-    _TELEMETRIA_CACHE["timestamp"] = ahora
-    _TELEMETRIA_CACHE["data"] = resultado
+    _TELEMETRIA_CACHE[uid] = {"timestamp": ahora, "data": resultado}
     return resultado
 
 
-def calcular_niveles_progresion(db: Session, ftp: int):
-    """Calcula niveles de progresión realistas (1.0 a 9.8) sobre los últimos 42 días evitando techos artificiales de 10.0."""
+def calcular_niveles_progresion(db: Session, usuario_id: int, ftp: int):
     hace_42d = datetime.now() - timedelta(days=42)
     acts = db.query(models.Activity).filter(
-        models.Activity.usuario_id == 1,
+        models.Activity.usuario_id == usuario_id,
         models.Activity.start_date_local >= hace_42d
     ).all()
 
     if not acts:
         return {
-            "resistencia_z2": 4.5,
-            "tempo_torque": 4.2,
-            "sweet_spot": 4.6,
-            "umbral_ftp": 4.0,
-            "vo2max": 3.4,
-            "durabilidad_kj": 4.4,
+            "resistencia_z2": 4.0,
+            "tempo_torque": 3.8,
+            "sweet_spot": 4.2,
+            "umbral_ftp": 3.8,
+            "vo2max": 3.2,
+            "durabilidad_kj": 3.9,
             "distribucion": {"z1_z2_pct": 78, "z3_z4_pct": 16, "z5_pct": 6, "modelo": "Piramidal Base"}
         }
 
@@ -311,7 +410,6 @@ def calcular_niveles_progresion(db: Session, ftp: int):
     z5_pct = max(0, 100 - z1_z2_pct - z3_z4_pct)
     modelo = "Polarizado 80/20" if (z1_z2_pct >= 75 and z5_pct >= z3_z4_pct) else "Piramidal Científico"
 
-    # Escala progresiva calibrada (9.5 requiere volumen de élite sostenido)
     lvl_z2 = round(min(9.5, max(2.5, 3.2 + (horas_sem * 0.42) + min(2.2, max_horas * 0.35))), 1)
     lvl_torque = round(min(9.4, max(2.5, 3.0 + (desnivel_medio_salida / 420.0) * 1.4 + min(2.0, salidas_ss * 0.25))), 1)
     lvl_ss = round(min(9.4, max(2.5, 3.4 + min(4.8, salidas_ss * 0.55))), 1)
@@ -336,7 +434,6 @@ def calcular_niveles_progresion(db: Session, ftp: int):
 
 
 def generar_estructura_respaldo(tipo_sesion: str, duracion_total: int):
-    """Genera una estructura fisiológica exacta para cualquier tipo de sesión."""
     dur = int(duracion_total or 0)
     if dur <= 0 or "descanso" in (tipo_sesion or "").lower():
         return None
@@ -435,68 +532,9 @@ def normalizar_estructura(bloques, duracion_total, tipo_sesion=""):
     dur_total_int = int(duracion_total or 0)
     if dur_total_int <= 0:
         return None
-
     if not isinstance(bloques, list) or not bloques:
         return generar_estructura_respaldo(tipo_sesion, dur_total_int)
-
-    limpios = []
-    for b in bloques:
-        if not isinstance(b, dict):
-            continue
-        etiqueta = str(b.get("etiqueta") or b.get("label") or "Bloque")[:60]
-        tipo_b = str(b.get("tipo") or b.get("type") or "continuo").lower()
-        if "inter" in tipo_b or b.get("repeticiones") or b.get("reps"):
-            limpios.append({
-                "tipo": "intervalos",
-                "etiqueta": etiqueta,
-                "repeticiones": int(_num(b.get("repeticiones") or b.get("reps"), 2, 1, 60)),
-                "trabajo_min": round(_num(b.get("trabajo_min") or b.get("workMin") or b.get("duracion_min"), 5, 0.1, 240), 2),
-                "trabajo_ftp_pct": round(_num(b.get("trabajo_ftp_pct") or b.get("workPct") or b.get("ftp_pct"), 90, 30, 400)),
-                "trabajo_cadencia": str(b.get("trabajo_cadencia") or b.get("cadencia") or "90 rpm")[:20],
-                "recuperacion_min": round(_num(b.get("recuperacion_min") or b.get("restMin"), 3, 0, 120), 2),
-                "recuperacion_ftp_pct": round(_num(b.get("recuperacion_ftp_pct") or b.get("restPct"), 55, 30, 150)),
-            })
-        else:
-            limpios.append({
-                "tipo": "continuo",
-                "etiqueta": etiqueta,
-                "duracion_min": round(_num(b.get("duracion_min") or b.get("durationMin") or b.get("trabajo_min"), 15, 1, 600)),
-                "ftp_pct": round(_num(b.get("ftp_pct") or b.get("ftpPct") or b.get("trabajo_ftp_pct"), 68, 30, 400)),
-                "cadencia": str(b.get("cadencia") or b.get("trabajo_cadencia") or "90 rpm")[:20],
-            })
-
-    if not limpios:
-        return generar_estructura_respaldo(tipo_sesion, dur_total_int)
-
-    total = sum(
-        b["duracion_min"] if b["tipo"] == "continuo"
-        else b["repeticiones"] * (b["trabajo_min"] + b["recuperacion_min"])
-        for b in limpios
-    )
-    ajuste = round(dur_total_int - total)
-    if ajuste != 0:
-        continuos = [b for b in limpios if b["tipo"] == "continuo"]
-        if continuos:
-            mayor = max(continuos, key=lambda b: b["duracion_min"])
-            if mayor["duracion_min"] + ajuste >= 5:
-                mayor["duracion_min"] += ajuste
-            elif ajuste > 0:
-                limpios.append({
-                    "tipo": "continuo",
-                    "etiqueta": "Rodaje Z2 complementario",
-                    "duracion_min": ajuste,
-                    "ftp_pct": 66,
-                    "cadencia": "90 rpm"
-                })
-        elif ajuste > 0:
-            limpios.insert(0, {
-                "tipo": "continuo",
-                "etiqueta": "Base aeróbica Z2",
-                "duracion_min": ajuste,
-                "ftp_pct": 66,
-                "cadencia": "90 rpm"
-            })
-    return limpios
+    return generar_estructura_respaldo(tipo_sesion, dur_total_int)
 
 
 def cargar_estructura(texto):
@@ -536,7 +574,6 @@ def estructura_a_texto_intervals(estructura):
 
 
 def extraer_sesiones_de_json_truncado(error_str: str):
-    """Rescata todas las sesiones del intento de llamada a herramienta cuando Groq devuelve 400 tool_use_failed."""
     if "failed_generation" not in error_str and '"sesiones"' not in error_str:
         return None
     objetos_sesion = []
@@ -566,7 +603,6 @@ def extraer_sesiones_de_json_truncado(error_str: str):
 
 
 def formatear_respuesta_semanal_markdown(guardado: list, ftp: int) -> str:
-    """Genera una respuesta Markdown completa y exacta a partir de los entrenamientos guardados en BD."""
     filas = []
     desglose = []
     for s in guardado:
@@ -588,46 +624,133 @@ def formatear_respuesta_semanal_markdown(guardado: list, ftp: int) -> str:
         detalle_bloques = " → ".join(pasos_txt) if pasos_txt else "Descanso pasivo y supercompensación."
         desglose.append(f"* **{dia_cap} — {s['sesion']} ({s['tss']} TSS):** {detalle_bloques}")
 
-    tabla = (
+    return (
         "### 🗓 Planificación Semanal\n\n"
         "| Día | Entorno | Duración | Sesión | TSS |\n"
         "| :--- | :--- | :--- | :--- | :--- |\n"
         + "\n".join(filas)
-        + "\n\n### 🔬 Análisis Fisiológico y Ejecución (FTP " + f"{ftp}W)\n\n"
+        + f"\n\n### 🔬 Análisis Fisiológico y Ejecución (FTP {ftp}W)\n\n"
         + "\n".join(desglose)
         + "\n\n### 💡 Pro-Tips del Coach\n"
-        "* **Nutrición intra-entreno:** En sesiones de 90-120 min apunta a **60 g CHO/h**; en tiradas de 3h sube a **80-90 g CHO/h** (ratio glucosa:fructosa 1:0.8).\n"
-        "* **Control de deriva cardíaca:** Mantén una cadencia fluida (90-95 rpm en Z2 y 60-65 rpm en bloques específicos de fuerza/torque) vigilando que el pulso no derive más de un 5%."
+        "* **Nutrición intra-entreno:** En sesiones de 90-120 min apunta a **60 g CHO/h**; en tiradas de 3h sube a **80-90 g CHO/h**.\n"
+        "* **Control de deriva cardíaca:** Mantén una cadencia fluida (90-95 rpm en Z2 y 60-65 rpm en bloques específicos de fuerza/torque)."
     )
-    return tabla
+
+
+# ============================================================================
+# ENDPOINTS DE AUTENTICACIÓN Y GESTIÓN DE CUENTA MULTIUSUARIO
+# ============================================================================
+@app.post("/api/auth/register")
+def registrar_usuario(payload: RegistroPayload, db: Session = Depends(get_db)):
+    email_limpio = payload.email.strip().lower()
+    if not email_limpio or not payload.password or len(payload.password) < 4:
+        raise HTTPException(status_code=400, detail="Introduce un email válido y una contraseña de al menos 4 caracteres.")
+
+    existente = db.query(models.Usuario).filter(models.Usuario.email == email_limpio).first()
+    if existente:
+        raise HTTPException(status_code=400, detail="Este email ya está registrado. Inicia sesión con tu cuenta.")
+
+    token = secrets.token_urlsafe(32)
+    nuevo = models.Usuario(
+        email=email_limpio,
+        nombre=payload.nombre.strip() or "Ciclista",
+        password_hash=hash_password(payload.password),
+        token_sesion=token,
+        ftp_actual=payload.ftp_actual or 250,
+        peso_actual=payload.peso_actual or 70.0,
+        lthr=payload.lthr or 175,
+        max_hr=payload.max_hr or 195,
+        intervals_athlete_id=(payload.intervals_athlete_id or "").strip() or None,
+        intervals_api_key=(payload.intervals_api_key or "").strip() or None,
+    )
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+
+    # Si introdujo claves de Intervals.icu, sincronizamos su telemetría inicial
+    if nuevo.intervals_athlete_id and nuevo.intervals_api_key:
+        obtener_telemetria_intervals_en_vivo(db, nuevo, forzar=True)
+
+    return {"status": "success", "token": token, "usuario": serializar_usuario(nuevo)}
+
+
+@app.post("/api/auth/login")
+def login_usuario(payload: LoginPayload, db: Session = Depends(get_db)):
+    email_limpio = payload.email.strip().lower()
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == email_limpio).first()
+    if not usuario:
+        raise HTTPException(status_code=401, detail="No existe ninguna cuenta con ese email.")
+
+    hash_intento = hash_password(payload.password)
+    # Si el usuario 1 existía antes de tener password_hash, le permitimos entrar y fijamos su contraseña
+    if usuario.password_hash and usuario.password_hash != hash_intento:
+        raise HTTPException(status_code=401, detail="Contraseña incorrecta.")
+
+    if not usuario.password_hash:
+        usuario.password_hash = hash_intento
+
+    token = secrets.token_urlsafe(32)
+    usuario.token_sesion = token
+    db.commit()
+    db.refresh(usuario)
+
+    return {"status": "success", "token": token, "usuario": serializar_usuario(usuario)}
+
+
+@app.get("/api/auth/me")
+def obtener_perfil_actual(
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
+    return {"status": "success", "usuario": serializar_usuario(usuario)}
+
+
+@app.put("/api/auth/perfil")
+def actualizar_perfil_usuario(
+    payload: ActualizarPerfilPayload,
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
+    if payload.nombre is not None and payload.nombre.strip():
+        usuario.nombre = payload.nombre.strip()
+    if payload.ftp_actual is not None and payload.ftp_actual > 50:
+        usuario.ftp_actual = int(payload.ftp_actual)
+    if payload.peso_actual is not None and payload.peso_actual > 30:
+        usuario.peso_actual = float(payload.peso_actual)
+    if payload.lthr is not None and payload.lthr > 80:
+        usuario.lthr = int(payload.lthr)
+    if payload.max_hr is not None and payload.max_hr > 100:
+        usuario.max_hr = int(payload.max_hr)
+    if payload.intervals_athlete_id is not None:
+        usuario.intervals_athlete_id = payload.intervals_athlete_id.strip() or None
+    if payload.intervals_api_key is not None and payload.intervals_api_key.strip():
+        usuario.intervals_api_key = payload.intervals_api_key.strip()
+
+    db.commit()
+    db.refresh(usuario)
+    obtener_telemetria_intervals_en_vivo(db, usuario, forzar=True)
+    return {"status": "success", "usuario": serializar_usuario(usuario)}
 
 
 @app.get("/")
 def read_root():
-    return {"status": "ok", "message": "Backend VeloCoach Pro activo y sincronizado con Intervals.icu"}
-
-
-@app.get("/activities")
-async def get_activities():
-    oldest = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
-    newest = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    url = f"{BASE_URL}/{ATHLETE_ID}/activities"
-    params = {"oldest": oldest, "newest": newest}
-    auth = ("API_KEY", API_KEY)
-
-    async with httpx.AsyncClient() as client_http:
-        response = await client_http.get(url, params=params, auth=auth)
-
-    return response.json()
+    return {"status": "ok", "message": "Backend VeloCoach Pro Multi-User activo"}
 
 
 @app.post("/sync")
-async def sync_activities(db: Session = Depends(get_db)):
+async def sync_activities(
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
+    ath_id, api_k = credenciales_intervals(usuario)
+    if not ath_id or not api_k:
+        return {"status": "no_credentials", "message": "Configura tu Athlete ID y API Key de Intervals.icu en tu perfil."}
+
     oldest = "2022-01-01T00:00:00"
     newest = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    url = f"{BASE_URL}/{ATHLETE_ID}/activities"
+    url = f"{BASE_URL}/{ath_id}/activities"
     params = {"oldest": oldest, "newest": newest}
-    auth = ("API_KEY", API_KEY)
+    auth = ("API_KEY", api_k)
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client_http:
@@ -647,9 +770,13 @@ async def sync_activities(db: Session = Depends(get_db)):
         if act.get("type") == "Ride" and not act.get("device_watts"):
             continue
 
-        existing_act = db.query(models.Activity).filter(models.Activity.id == act.get("id")).first()
-        act_db = existing_act or models.Activity(id=act.get("id"), usuario_id=1)
+        raw_id = str(act.get("id"))
+        act_pk = raw_id if usuario.id == 1 else f"u{usuario.id}_{raw_id}"
 
+        existing_act = db.query(models.Activity).filter(models.Activity.id == act_pk).first()
+        act_db = existing_act or models.Activity(id=act_pk, usuario_id=usuario.id)
+
+        act_db.usuario_id = usuario.id
         act_db.icu_ctl = act.get("icu_ctl")
         act_db.icu_atl = act.get("icu_atl")
         act_db.name = act.get("name")
@@ -676,17 +803,17 @@ async def sync_activities(db: Session = Depends(get_db)):
         if act_db.start_date_local and (act_db.moving_time or 0) > 900:
             fecha_act = act_db.start_date_local.date()
             sesion_prog = db.query(models.EntrenamientoProgramado).filter(
-                models.EntrenamientoProgramado.usuario_id == 1,
+                models.EntrenamientoProgramado.usuario_id == usuario.id,
                 models.EntrenamientoProgramado.fecha_programada == fecha_act
             ).first()
             if sesion_prog and sesion_prog.duracion_minutos_planeada > 0:
                 sesion_prog.estado = "Completado"
                 sesion_prog.tss_real = int(act_db.tss or 0)
-                sesion_prog.actividad_completada_id = str(act_db.id)
+                sesion_prog.actividad_completada_id = act_pk
                 auto_completed_sessions += 1
 
     db.commit()
-    obtener_telemetria_intervals_en_vivo(db, forzar=True)
+    obtener_telemetria_intervals_en_vivo(db, usuario, forzar=True)
 
     return {
         "status": "success",
@@ -698,7 +825,11 @@ async def sync_activities(db: Session = Depends(get_db)):
 
 
 @app.post("/api/disponibilidad")
-def guardar_disponibilidad_semanal(payload: DisponibilidadPayload, db: Session = Depends(get_db)):
+def guardar_disponibilidad_semanal(
+    payload: DisponibilidadPayload,
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     orden = ["L", "M", "X", "J", "V", "S", "D"]
     partes = []
     total_h = 0.0
@@ -709,12 +840,10 @@ def guardar_disponibilidad_semanal(payload: DisponibilidadPayload, db: Session =
         partes.append(f"{d}={h_str}")
     resumen_disp = f"{', '.join(partes)} (Máx: {round(total_h, 1)}h/sem)"
 
-    usuario = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
-    if usuario:
-        usuario.disponibilidad_json = resumen_disp
+    usuario.disponibilidad_json = resumen_disp
 
     obj = db.query(models.Objetivo).filter(
-        models.Objetivo.usuario_id == 1,
+        models.Objetivo.usuario_id == usuario.id,
         models.Objetivo.activo == True
     ).order_by(models.Objetivo.prioridad.asc()).first()
     if obj:
@@ -725,12 +854,16 @@ def guardar_disponibilidad_semanal(payload: DisponibilidadPayload, db: Session =
 
 
 @app.post("/api/objetivos")
-def crear_o_actualizar_objetivo(payload: NuevoObjetivoPayload, db: Session = Depends(get_db)):
+def crear_o_actualizar_objetivo(
+    payload: NuevoObjetivoPayload,
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     try:
         fecha_dt = datetime.strptime(payload.fecha_meta.strip(), "%Y-%m-%d").date()
         prio = (payload.prioridad or "B").upper()[:1]
         nuevo = models.Objetivo(
-            usuario_id=1,
+            usuario_id=usuario.id,
             nombre=payload.nombre.strip(),
             fecha_meta=fecha_dt,
             prioridad=prio,
@@ -748,10 +881,14 @@ def crear_o_actualizar_objetivo(payload: NuevoObjetivoPayload, db: Session = Dep
 
 
 @app.delete("/api/objetivos/{objetivo_id}")
-def eliminar_objetivo(objetivo_id: int, db: Session = Depends(get_db)):
+def eliminar_objetivo(
+    objetivo_id: int,
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     obj = db.query(models.Objetivo).filter(
         models.Objetivo.id == objetivo_id,
-        models.Objetivo.usuario_id == 1
+        models.Objetivo.usuario_id == usuario.id
     ).first()
     if not obj:
         return {"error": "Objetivo no encontrado"}
@@ -761,25 +898,29 @@ def eliminar_objetivo(objetivo_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/checkin")
-def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depends(get_db)):
+def checkin_diario_adaptativo(
+    payload: CheckinDiarioPayload,
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     try:
         fecha_obj = (
             datetime.strptime(payload.fecha.strip(), "%Y-%m-%d").date()
             if payload.fecha else datetime.now().date()
         )
         obj = db.query(models.Objetivo).filter(
-            models.Objetivo.usuario_id == 1,
+            models.Objetivo.usuario_id == usuario.id,
             models.Objetivo.activo == True
         ).order_by(models.Objetivo.prioridad.asc()).first()
 
         sesion_db = db.query(models.EntrenamientoProgramado).filter(
-            models.EntrenamientoProgramado.usuario_id == 1,
+            models.EntrenamientoProgramado.usuario_id == usuario.id,
             models.EntrenamientoProgramado.fecha_programada == fecha_obj
         ).first()
 
         if not sesion_db:
             sesion_db = models.EntrenamientoProgramado(
-                usuario_id=1,
+                usuario_id=usuario.id,
                 objetivo_id=obj.id if obj else None,
                 fecha_programada=fecha_obj,
                 estado="Pendiente"
@@ -796,9 +937,7 @@ def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depen
             sesion_db.tss_planeado = 0
             sesion_db.entorno = entorno
             sesion_db.estructura = None
-            sesion_db.motivo_adaptacion = (
-                "Check-in diario: Supercompensación y descanso pasivo por fatiga elevada o falta de tiempo hoy."
-            )
+            sesion_db.motivo_adaptacion = "Check-in diario: Supercompensación y descanso pasivo."
         elif sensacion == "cargadas":
             dur_real = min(min_disp, 75)
             sesion_db.tipo_sesion = f"Z1/Z2 Regenerativo Activo ({dur_real}m)"
@@ -807,9 +946,7 @@ def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depen
             sesion_db.entorno = entorno
             estructura = generar_estructura_respaldo("Regenerativo Z1", dur_real)
             sesion_db.estructura = json.dumps(estructura, ensure_ascii=False)
-            sesion_db.motivo_adaptacion = (
-                f"Check-in diario (piernas cargadas): Se reduce la carga neuromuscular a rodaje regenerativo al 50-58% FTP durante {dur_real} min."
-            )
+            sesion_db.motivo_adaptacion = f"Check-in diario (piernas cargadas): Rodaje regenerativo durante {dur_real} min."
         elif sensacion == "frescas":
             if min_disp <= 75:
                 tipo_nuevo = f"Micro-intervalos Rønnestad 30/15s ({min_disp}m)"
@@ -826,9 +963,7 @@ def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depen
             sesion_db.entorno = entorno
             estructura = generar_estructura_respaldo(tipo_nuevo, min_disp)
             sesion_db.estructura = json.dumps(estructura, ensure_ascii=False)
-            sesion_db.motivo_adaptacion = (
-                f"Check-in diario (piernas frescas, {min_disp} min en {entorno}): Estímulo de calidad optimizado para aprovechar tu ventana fisiológica."
-            )
+            sesion_db.motivo_adaptacion = f"Check-in diario (piernas frescas, {min_disp} min en {entorno})."
         else:
             nombre_base = sesion_db.tipo_sesion or "Base Aeróbica Z2 + Tempo"
             if "descanso" in nombre_base.lower():
@@ -837,11 +972,9 @@ def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depen
             sesion_db.duracion_minutos_planeada = min_disp
             sesion_db.tss_planeado = round((min_disp / 60.0) * 58)
             sesion_db.entorno = entorno
-            estructura = normalizar_estructura(cargar_estructura(sesion_db.estructura), min_disp, sesion_db.tipo_sesion)
+            estructura = generar_estructura_respaldo(sesion_db.tipo_sesion, min_disp)
             sesion_db.estructura = json.dumps(estructura, ensure_ascii=False) if estructura else None
-            sesion_db.motivo_adaptacion = (
-                f"Check-in diario: Duración reajustada exactamente a tus {min_disp} min disponibles hoy en {entorno}."
-            )
+            sesion_db.motivo_adaptacion = f"Check-in diario: Duración ajustada a {min_disp} min hoy."
 
         db.commit()
         return {"status": "success", "sesion": sesion_db.tipo_sesion, "duracion": sesion_db.duracion_minutos_planeada}
@@ -851,12 +984,17 @@ def checkin_diario_adaptativo(payload: CheckinDiarioPayload, db: Session = Depen
 
 
 @app.post("/chat")
-def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
+def chat_entrenador(
+    mensaje: MensajeChat,
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     try:
         hoy_dt = datetime.now()
         hoy_date = hoy_dt.date()
+        uid = usuario.id
 
-        telemetria = obtener_telemetria_intervals_en_vivo(db)
+        telemetria = obtener_telemetria_intervals_en_vivo(db, usuario)
         ftp_actual = telemetria["ftp"]
         peso_actual = telemetria["peso"]
         wkg_actual = telemetria["wkg"]
@@ -865,14 +1003,13 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         atl_actual = telemetria["atl"]
         tsb_actual = telemetria["tsb"]
 
-        niveles = calcular_niveles_progresion(db, ftp_actual)
-        usuario_db = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
+        niveles = calcular_niveles_progresion(db, uid, ftp_actual)
 
         hace_un_ano = hoy_dt - timedelta(days=365)
         hace_4_semanas = hoy_dt - timedelta(days=28)
 
         acts_ano = db.query(models.Activity).filter(
-            models.Activity.usuario_id == 1,
+            models.Activity.usuario_id == uid,
             models.Activity.start_date_local >= hace_un_ano
         ).all()
 
@@ -890,13 +1027,13 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         media_horas_ultimas_4_sem = round(sum((a.moving_time or 0) for a in acts_recientes) / 3600 / 4, 1)
 
         objetivos_activos = db.query(models.Objetivo).filter(
-            models.Objetivo.usuario_id == 1,
+            models.Objetivo.usuario_id == uid,
             models.Objetivo.activo == True
         ).order_by(models.Objetivo.prioridad.asc(), models.Objetivo.fecha_meta.asc()).all()
 
         obj_principal = objetivos_activos[0] if objetivos_activos else None
         disponibilidad_guardada = (
-            (usuario_db.disponibilidad_json if usuario_db and usuario_db.disponibilidad_json else None)
+            (usuario.disponibilidad_json if usuario.disponibilidad_json else None)
             or (obj_principal.disponibilidad_semanal if obj_principal and obj_principal.disponibilidad_semanal else None)
             or "No especificada aún"
         )
@@ -905,7 +1042,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
         fase_activa_hoy = None
         if obj_principal:
             fases_db = db.query(models.FaseMacrociclo).filter(
-                models.FaseMacrociclo.usuario_id == 1,
+                models.FaseMacrociclo.usuario_id == uid,
                 models.FaseMacrociclo.objetivo_id == obj_principal.id
             ).order_by(models.FaseMacrociclo.orden.asc()).all()
             for f in fases_db:
@@ -916,7 +1053,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 fase_activa_hoy = fases_db[0]
 
         sesiones_proximas = db.query(models.EntrenamientoProgramado).filter(
-            models.EntrenamientoProgramado.usuario_id == 1,
+            models.EntrenamientoProgramado.usuario_id == uid,
             models.EntrenamientoProgramado.fecha_programada >= hoy_date
         ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(7).all()
 
@@ -934,20 +1071,20 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 prio_limpia = (prioridad or "A").upper()[:1]
 
                 obj = db.query(models.Objetivo).filter(
-                    models.Objetivo.usuario_id == 1,
+                    models.Objetivo.usuario_id == uid,
                     models.Objetivo.activo == True,
                     models.Objetivo.prioridad == prio_limpia
                 ).first()
 
                 if not obj and prio_limpia == "A":
                     obj = db.query(models.Objetivo).filter(
-                        models.Objetivo.usuario_id == 1,
+                        models.Objetivo.usuario_id == uid,
                         models.Objetivo.activo == True
                     ).first()
 
                 if not obj:
                     obj = models.Objetivo(
-                        usuario_id=1,
+                        usuario_id=uid,
                         nombre=objetivo,
                         fecha_meta=fecha_meta_dt,
                         prioridad=prio_limpia,
@@ -967,18 +1104,18 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     if disponibilidad_semanal:
                         obj.disponibilidad_semanal = disponibilidad_semanal
 
-                if disponibilidad_semanal and usuario_db:
-                    usuario_db.disponibilidad_json = disponibilidad_semanal
+                if disponibilidad_semanal:
+                    usuario.disponibilidad_json = disponibilidad_semanal
 
                 if fases:
                     db.query(models.FaseMacrociclo).filter(
-                        models.FaseMacrociclo.usuario_id == 1,
+                        models.FaseMacrociclo.usuario_id == uid,
                         models.FaseMacrociclo.objetivo_id == obj.id
                     ).delete()
 
                     for idx, f in enumerate(fases):
                         nueva_fase = models.FaseMacrociclo(
-                            usuario_id=1,
+                            usuario_id=uid,
                             objetivo_id=obj.id,
                             orden=idx + 1,
                             nombre=f.get("nombre", f"Fase {idx + 1}"),
@@ -1007,7 +1144,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                         if fecha_meta else (hoy_date + timedelta(days=120))
                     )
                     obj = models.Objetivo(
-                        usuario_id=1,
+                        usuario_id=uid,
                         nombre=objetivo or "Objetivo Principal",
                         fecha_meta=fecha_dt,
                         prioridad="A",
@@ -1025,19 +1162,19 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     if disponibilidad_semanal:
                         obj.disponibilidad_semanal = disponibilidad_semanal
 
-                if disponibilidad_semanal and usuario_db:
-                    usuario_db.disponibilidad_json = disponibilidad_semanal
+                if disponibilidad_semanal:
+                    usuario.disponibilidad_json = disponibilidad_semanal
 
                 resumen_guardado = []
                 for s in sesiones:
                     fecha_obj = datetime.strptime(s["fecha"].strip(), "%Y-%m-%d").date()
                     sesion_db = db.query(models.EntrenamientoProgramado).filter(
-                        models.EntrenamientoProgramado.usuario_id == 1,
+                        models.EntrenamientoProgramado.usuario_id == uid,
                         models.EntrenamientoProgramado.fecha_programada == fecha_obj
                     ).first()
                     if not sesion_db:
                         sesion_db = models.EntrenamientoProgramado(
-                            usuario_id=1,
+                            usuario_id=uid,
                             objetivo_id=obj.id,
                             fecha_programada=fecha_obj
                         )
@@ -1053,8 +1190,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                     sesion_db.tss_planeado = int(s.get("tss", round(dur_min * 0.65))) if dur_min > 0 else 0
                     sesion_db.estado = s.get("estado", "Pendiente")
 
-                    # AL QUITAR BLOQUES DEL JSON, USAMOS SIEMPRE LA GENERACIÓN AUTOMÁTICA SEGÚN EL TÍTULO
-                    estructura = normalizar_estructura([], dur_min, tipo_ses)
+                    estructura = generar_estructura_respaldo(tipo_ses, dur_min)
                     sesion_db.estructura = json.dumps(estructura, ensure_ascii=False) if estructura else None
                     if s.get("nota_entrenador"):
                         sesion_db.motivo_adaptacion = s.get("nota_entrenador")
@@ -1077,7 +1213,6 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 db.rollback()
                 return {"error": str(e)}
 
-        # ESQUEMA SIMPLIFICADO: Eliminado el array anidado 'bloques' de actualizar_calendario
         tools = [
             {
                 "type": "function",
@@ -1115,7 +1250,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                 "type": "function",
                 "function": {
                     "name": "actualizar_calendario",
-                    "description": "Guarda en la base de datos las sesiones de la semana. EL MOTOR DE PYTHON GENERARÁ LOS BLOQUES INTERNOS BASÁNDOSE EN EL TÍTULO.",
+                    "description": "Guarda en la base de datos las sesiones de la semana.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1126,7 +1261,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
                                     "type": "object",
                                     "properties": {
                                         "fecha": {"type": "string", "description": "YYYY-MM-DD"},
-                                        "tipo_sesion": {"type": "string", "description": "Título MUY detallado para que Python cree los bloques. Ej: 'Rønnestad 30/15s', 'Sweet Spot Progresivo', 'Z2 + Fuerza Torque 65rpm', 'Z2 FatMax'."},
+                                        "tipo_sesion": {"type": "string", "description": "Título descriptivo: 'Rønnestad 30/15s', 'Sweet Spot Progresivo', 'Z2 + Fuerza Torque 65rpm', 'Z2 FatMax'."},
                                         "entorno": {"type": "string", "description": "'Indoor' o 'Outdoor'"},
                                         "duracion_minutos": {"type": "integer"},
                                         "tss": {"type": "integer"},
@@ -1161,9 +1296,9 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
 
         system_prompt = (
             f"Hoy es {nombre_dia(hoy_dt)} {hoy_dt.strftime('%Y-%m-%d')}.\n"
-            "Eres el Director Deportivo y Fisiólogo Jefe de Diego Allue. Diseñas entrenamientos basados en evidencia científica moderna (Seiler, Rønnestad, Issurin, San Millán, Jeukendrup) y en sus datos reales de Intervals.icu.\n\n"
+            f"Eres el Director Deportivo y Fisiólogo Jefe de {usuario.nombre}. Diseñas entrenamientos basados en evidencia científica moderna (Seiler, Rønnestad, Issurin, San Millán, Jeukendrup).\n\n"
             "📊 TELEMETRÍA EN VIVO Y NIVELES DE PROGRESIÓN:\n"
-            f"- FTP actual: {ftp_actual}W | Peso: {peso_actual} kg ({wkg_actual} W/kg) | LTHR: {lthr_actual} bpm | FC Máx: {telemetria['max_hr']} bpm.\n"
+            f"- Ciclista: {usuario.nombre} | FTP actual: {ftp_actual}W | Peso: {peso_actual} kg ({wkg_actual} W/kg) | LTHR: {lthr_actual} bpm | FC Máx: {telemetria['max_hr']} bpm.\n"
             f"- Carga actual: Fitness (CTL) {ctl_actual} | Fatiga (ATL) {atl_actual} | Frescura (TSB) {tsb_actual}.\n"
             f"- Niveles de Progresión: Z2={niveles['resistencia_z2']}/10 | Torque={niveles['tempo_torque']}/10 | Sweet Spot={niveles['sweet_spot']}/10 | FTP={niveles['umbral_ftp']}/10 | VO2max={niveles['vo2max']}/10 | Durabilidad={niveles['durabilidad_kj']}/10.\n"
             f"- Últimos 365 días: {horas_ultimo_ano} h y {desnivel_ultimo_ano:,} m desnivel | Salida récord: {salida_mas_larga_h} h ({salida_mas_larga_desnivel:,} m) | Últimas 4 sem: {media_horas_ultimas_4_sem} h/sem.\n\n"
@@ -1174,7 +1309,7 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
             f"- Agenda actual: {txt_sesiones_bd}\n\n"
             "REGLAS DE EJECUCIÓN:\n"
             f"1. Para programar esta semana, usa las fechas desde hoy hasta el domingo: [{fechas_validas_str}].\n"
-            "2. En 'actualizar_calendario', NO DEBES ENVIAR JSON DE BLOQUES. El motor de Python los generará. Tu única misión es dar un 'tipo_sesion' descriptivo (ej. 'VO2max 4x4m', 'Torque 65rpm', 'Z2 FatMax') para que el backend sepa qué estructura crear.\n"
+            "2. En 'actualizar_calendario', da un 'tipo_sesion' descriptivo (ej. 'VO2max 4x4m', 'Torque 65rpm', 'Sweet Spot Progresivo', 'Z2 FatMax') para que el backend genere los bloques.\n"
             "3. Tras llamar a 'actualizar_calendario', presenta SIEMPRE:\n"
             "### 🗓 Planificación Semanal\n(Tabla Markdown)\n"
             f"### 🔬 Análisis Fisiológico y Ejecución (FTP {ftp_actual}W)\n"
@@ -1271,37 +1406,43 @@ def chat_entrenador(mensaje: MensajeChat, db: Session = Depends(get_db)):
 
 
 @app.get("/stats")
-def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
+def obtener_estadisticas_dashboard(
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     try:
-        telemetria = obtener_telemetria_intervals_en_vivo(db)
+        telemetria = obtener_telemetria_intervals_en_vivo(db, usuario)
         ftp = telemetria["ftp"]
         peso = telemetria["peso"]
-        niveles = calcular_niveles_progresion(db, ftp)
+        niveles = calcular_niveles_progresion(db, usuario.id, ftp)
 
         fecha_limite = datetime.now() - timedelta(days=30)
         historial = db.query(models.Activity).filter(
+            models.Activity.usuario_id == usuario.id,
             models.Activity.icu_ctl.isnot(None),
             models.Activity.start_date_local >= fecha_limite
         ).order_by(models.Activity.start_date_local.asc()).all()
 
         if not historial:
             ultima_act = db.query(models.Activity).filter(
+                models.Activity.usuario_id == usuario.id,
                 models.Activity.icu_ctl.isnot(None)
             ).order_by(models.Activity.start_date_local.desc()).first()
-            if not ultima_act:
-                return {"error": "No hay suficientes datos. Sincroniza con Intervals.icu primero."}
-            historial = [ultima_act]
-
-        ultima_act = historial[-1]
-        ctl = round(ultima_act.icu_ctl, 1)
-        atl = round(ultima_act.icu_atl, 1)
-        tsb = round(ctl - atl, 1)
-
-        grafica_ctl = [{"value": round(act.icu_ctl, 1), "label": act.start_date_local.strftime("%d/%m")} for act in historial]
-        grafica_atl = [{"value": round(act.icu_atl, 1), "label": act.start_date_local.strftime("%d/%m")} for act in historial]
+            ctl = round(ultima_act.icu_ctl, 1) if ultima_act else telemetria["ctl"]
+            atl = round(ultima_act.icu_atl, 1) if ultima_act else telemetria["atl"]
+            tsb = round(ctl - atl, 1)
+            grafica_ctl = [{"value": ctl, "label": "Hoy"}] if ctl > 0 else []
+            grafica_atl = [{"value": atl, "label": "Hoy"}] if atl > 0 else []
+        else:
+            ultima_act = historial[-1]
+            ctl = round(ultima_act.icu_ctl, 1)
+            atl = round(ultima_act.icu_atl, 1)
+            tsb = round(ctl - atl, 1)
+            grafica_ctl = [{"value": round(act.icu_ctl, 1), "label": act.start_date_local.strftime("%d/%m")} for act in historial]
+            grafica_atl = [{"value": round(act.icu_atl, 1), "label": act.start_date_local.strftime("%d/%m")} for act in historial]
 
         prompt = (
-            f"El ciclista tiene CTL: {ctl}, ATL: {atl}, TSB: {tsb}, FTP: {ftp}W, peso: {peso}kg ({telemetria['wkg']} W/kg). "
+            f"El ciclista {usuario.nombre} tiene CTL: {ctl}, ATL: {atl}, TSB: {tsb}, FTP: {ftp}W, peso: {peso}kg ({telemetria['wkg']} W/kg). "
             f"Sus niveles de progresión actuales son Z2={niveles['resistencia_z2']}/10, SweetSpot={niveles['sweet_spot']}/10, VO2max={niveles['vo2max']}/10, Durabilidad={niveles['durabilidad_kj']}/10. "
             "Escribe un diagnóstico fisiológico directo y claro (2 párrafos) sobre su estado de forma, fortalezas/limitantes y recomendaciones de carga. Sin saludos."
         )
@@ -1313,6 +1454,7 @@ def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
         )
 
         return {
+            "usuario_nombre": usuario.nombre,
             "fitness_ctl": ctl,
             "fatiga_atl": atl,
             "frescura_tsb": tsb,
@@ -1334,9 +1476,20 @@ def obtener_estadisticas_dashboard(db: Session = Depends(get_db)):
 
 
 @app.post("/api/exportar/nube/{sesion_id}")
-async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
+async def exportar_a_nube(
+    sesion_id: int,
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     try:
-        sesion = db.query(models.EntrenamientoProgramado).filter(models.EntrenamientoProgramado.id == sesion_id).first()
+        ath_id, api_k = credenciales_intervals(usuario)
+        if not ath_id or not api_k:
+            return {"error": "Configura primero tu Athlete ID y API Key de Intervals.icu en tu perfil."}
+
+        sesion = db.query(models.EntrenamientoProgramado).filter(
+            models.EntrenamientoProgramado.id == sesion_id,
+            models.EntrenamientoProgramado.usuario_id == usuario.id
+        ).first()
         if not sesion:
             return {"error": "Sesión no encontrada"}
 
@@ -1357,8 +1510,8 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
             "indoor": True if "indoor" in (sesion.entorno or "").lower() else False
         }
 
-        url = f"{BASE_URL}/{ATHLETE_ID}/events"
-        auth = ("API_KEY", API_KEY)
+        url = f"{BASE_URL}/{ath_id}/events"
+        auth = ("API_KEY", api_k)
 
         async with httpx.AsyncClient() as client_http:
             response = await client_http.post(url, json=payload, auth=auth)
@@ -1371,9 +1524,20 @@ async def exportar_a_nube(sesion_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/api/exportar/archivo/{sesion_id}")
-async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
+async def exportar_archivo_fit(
+    sesion_id: int,
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     try:
-        sesion = db.query(models.EntrenamientoProgramado).filter(models.EntrenamientoProgramado.id == sesion_id).first()
+        ath_id, api_k = credenciales_intervals(usuario)
+        if not ath_id or not api_k:
+            return {"error": "Configura tu cuenta de Intervals.icu en tu perfil para compilar archivos .FIT"}
+
+        sesion = db.query(models.EntrenamientoProgramado).filter(
+            models.EntrenamientoProgramado.id == sesion_id,
+            models.EntrenamientoProgramado.usuario_id == usuario.id
+        ).first()
         if not sesion:
             return {"error": "Sesión no encontrada"}
 
@@ -1389,8 +1553,8 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
             "name": f"AI Coach: {sesion.tipo_sesion[:24]}",
             "description": workout_text
         }
-        url_events = f"{BASE_URL}/{ATHLETE_ID}/events"
-        auth = ("API_KEY", API_KEY)
+        url_events = f"{BASE_URL}/{ath_id}/events"
+        auth = ("API_KEY", api_k)
 
         async with httpx.AsyncClient() as client_http:
             resp_post = await client_http.post(url_events, json=payload, auth=auth)
@@ -1398,7 +1562,7 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
                 return {"error": "Fallo en la compilación"}
 
             evento_id = resp_post.json().get("id")
-            url_fit = f"{BASE_URL}/{ATHLETE_ID}/events/{evento_id}/download.fit"
+            url_fit = f"{BASE_URL}/{ath_id}/events/{evento_id}/download.fit"
             resp_fit = await client_http.get(url_fit, auth=auth)
 
             return Response(
@@ -1411,14 +1575,17 @@ async def exportar_archivo_fit(sesion_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/api/calendario")
-def get_calendario(db: Session = Depends(get_db)):
+def get_calendario(
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     try:
         hoy = datetime.now().date()
-        telemetria = obtener_telemetria_intervals_en_vivo(db)
-        usuario = db.query(models.Usuario).filter(models.Usuario.id == 1).first()
+        uid = usuario.id
+        telemetria = obtener_telemetria_intervals_en_vivo(db, usuario)
 
         objetivos = db.query(models.Objetivo).filter(
-            models.Objetivo.usuario_id == 1,
+            models.Objetivo.usuario_id == uid,
             models.Objetivo.activo == True
         ).order_by(models.Objetivo.prioridad.asc(), models.Objetivo.fecha_meta.asc()).all()
 
@@ -1428,7 +1595,7 @@ def get_calendario(db: Session = Depends(get_db)):
         if obj and hasattr(models, "FaseMacrociclo"):
             try:
                 fases_db = db.query(models.FaseMacrociclo).filter(
-                    models.FaseMacrociclo.usuario_id == 1,
+                    models.FaseMacrociclo.usuario_id == uid,
                     models.FaseMacrociclo.objetivo_id == obj.id
                 ).order_by(models.FaseMacrociclo.orden.asc()).all()
             except Exception:
@@ -1478,13 +1645,13 @@ def get_calendario(db: Session = Depends(get_db)):
 
         inicio_semana = hoy - timedelta(days=hoy.weekday())
         sesiones = db.query(models.EntrenamientoProgramado).filter(
-            models.EntrenamientoProgramado.usuario_id == 1,
+            models.EntrenamientoProgramado.usuario_id == uid,
             models.EntrenamientoProgramado.fecha_programada >= inicio_semana
         ).order_by(models.EntrenamientoProgramado.fecha_programada.asc()).limit(14).all()
 
         hace_30d = datetime.now() - timedelta(days=30)
         acts_recientes = db.query(models.Activity).filter(
-            models.Activity.usuario_id == 1,
+            models.Activity.usuario_id == uid,
             models.Activity.start_date_local >= hace_30d
         ).order_by(models.Activity.start_date_local.desc()).limit(35).all()
 
@@ -1566,7 +1733,7 @@ def get_calendario(db: Session = Depends(get_db)):
         nombre_obj = obj.nombre if obj else "Configura tu Objetivo"
         fecha_obj = obj.fecha_meta.strftime("%Y-%m-%d") if (obj and obj.fecha_meta) else None
         disp_actual = (
-            (usuario.disponibilidad_json if usuario and usuario.disponibilidad_json else None)
+            (usuario.disponibilidad_json if usuario.disponibilidad_json else None)
             or (obj.disponibilidad_semanal if obj else None)
         )
 
@@ -1603,6 +1770,7 @@ def get_calendario(db: Session = Depends(get_db)):
             db.commit()
 
         return {
+            "usuario": serializar_usuario(usuario),
             "telemetria": {
                 "ftp": telemetria["ftp"],
                 "peso": telemetria["peso"],
@@ -1648,7 +1816,7 @@ def get_calendario(db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Error protegido en get_calendario: {e}")
         return {
-            "telemetria": {"ftp": 305, "peso": 71.0, "lthr": 178, "max_hr": 200, "objetivo": "Configura tu Objetivo", "fecha_meta": None},
+            "telemetria": {"ftp": 250, "peso": 70.0, "lthr": 175, "max_hr": 195, "objetivo": "Configura tu Objetivo", "fecha_meta": None},
             "macrociclo": {"objetivo": "Configura tu Objetivo", "fecha_meta": None, "total_fases": 0, "resumen_estrategico": None, "fase_activa": None, "fases": []},
             "sesiones": [],
             "actividades_realizadas": []
@@ -1656,9 +1824,14 @@ def get_calendario(db: Session = Depends(get_db)):
 
 
 @app.post("/api/calendario/toggle/{sesion_id}")
-def toggle_estado_sesion(sesion_id: int, db: Session = Depends(get_db)):
+def toggle_estado_sesion(
+    sesion_id: int,
+    usuario: models.Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(get_db)
+):
     sesion = db.query(models.EntrenamientoProgramado).filter(
-        models.EntrenamientoProgramado.id == sesion_id
+        models.EntrenamientoProgramado.id == sesion_id,
+        models.EntrenamientoProgramado.usuario_id == usuario.id
     ).first()
     if not sesion:
         return {"error": "Sesión no encontrada"}

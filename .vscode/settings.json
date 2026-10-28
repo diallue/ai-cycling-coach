@@ -10,5 +10,6 @@
             "database": "training_db",
             "username": "user"
         }
-    ]
+    ],
+    "python.terminal.useEnvFile": true
 }
